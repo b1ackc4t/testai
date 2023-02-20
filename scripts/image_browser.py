@@ -664,7 +664,7 @@ def create_tab(tabname, current_gr_tab):
                         ranking = gr.Radio(value="None", choices=["1", "2", "3", "4", "5", "None"], label="ranking", elem_id=f"{tabname}_image_browser_ranking", interactive=True, visible=False)
                         auto_next = gr.Checkbox(label="Next Image After Ranking (To be implemented)", interactive=False, visible=False)
                     with gr.Row():
-                        image_gallery = gr.Gallery(show_label=False, elem_id=f"{tabname}_image_browser_gallery").style(grid=opts.image_browser_page_columns)
+                        image_gallery = gr.Gallery(show_label=False, elem_id=f"{tabname}_image_browser_gallery").style(grid=opts.image_browser_page_columns,height=("auto" if opts.image_browser_height_auto else None))
                     with gr.Row() as delete_panel:
                         with gr.Column(scale=1):
                             delete_num = gr.Number(value=1, interactive=True, label="delete next")
@@ -912,6 +912,7 @@ def on_ui_settings():
     image_browser_options.append(("image_browser_page_columns", 6, "Number of columns on the page", "images_history_page_columns"))
     image_browser_options.append(("image_browser_page_rows", 6, "Number of rows on the page", "images_history_page_rows"))
     image_browser_options.append(("image_browser_pages_perload", 20, "Minimum number of pages per load", "images_history_pages_perload"))
+    image_browser_options.append(("image_browser_height_auto", True, "Use automatic height for gallery", None))
 
     section = ('image-browser', "Image Browser")
     # Move historic setting names to current names
