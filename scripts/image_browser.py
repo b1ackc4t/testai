@@ -840,11 +840,7 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
                     with gr.Row():
                         ranking = gr.Radio(value="None", choices=["1", "2", "3", "4", "5", "None"], label="ranking", elem_id=f"{tab.base_tag}_image_browser_ranking", interactive=True, visible=False)
                     with gr.Row():
-<<<<<<< HEAD
-                        image_gallery = gr.Gallery(show_label=False, elem_id=f"{tabname}_image_browser_gallery").style(grid=opts.image_browser_page_columns,height=("auto" if opts.image_browser_height_auto else None))
-=======
-                        image_gallery = gr.Gallery(show_label=False, elem_id=f"{tab.base_tag}_image_browser_gallery").style(grid=opts.image_browser_page_columns)
->>>>>>> upstream/main
+                        image_gallery = gr.Gallery(show_label=False, elem_id=f"{tab.base_tag}_image_browser_gallery").style(grid=opts.image_browser_page_columns,height=("auto" if opts.image_browser_height_auto else None))
                     with gr.Row() as delete_panel:
                         with gr.Column(scale=1):
                             delete_num = gr.Number(value=1, interactive=True, label="delete next")
