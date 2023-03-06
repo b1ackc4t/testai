@@ -3,6 +3,8 @@ import os
 import sqlite3
 from modules import scripts
 
+version = 3
+
 path_recorder_file = os.path.join(scripts.basedir(), "path_recorder.txt")
 aes_cache_file = os.path.join(scripts.basedir(), "aes_scores.json")
 exif_cache_file = os.path.join(scripts.basedir(), "exif_data.json")
@@ -65,10 +67,15 @@ def create_db(cursor):
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS ranking (
             file TEXT PRIMARY KEY,
+            name TEXT,
             ranking TEXT,
             created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
+    ''')
+
+    cursor.execute('''
+        CREATE INDEX IF NOT EXISTS ranking_name ON ranking (name)
     ''')
 
     cursor.execute('''
@@ -88,8 +95,9 @@ def migrate_path_recorder(cursor):
                 # json-version
                 path_recorder = json.load(f)
             for path, values in path_recorder.items():
+                path = os.path.realpath(path)
                 depth = values["depth"]
-                path_display = values["path_display"]
+                path_display = f"{path} [{depth}]"
                 cursor.execute('''
                 INSERT INTO path_recorder (path, depth, path_display)
                 VALUES (?, ?, ?)
@@ -99,6 +107,7 @@ def migrate_path_recorder(cursor):
                 # old txt-version
                 path = f.readline().rstrip("\n")
                 while len(path) > 0:
+                    path = os.path.realpath(path)
                     cursor.execute('''
                     INSERT INTO path_recorder (path, depth, path_display)
                     VALUES (?, ?, ?)
@@ -180,10 +189,10 @@ def update_exif_data(cursor, file, info):
 def migrate_exif_data(cursor):
     if os.path.exists(exif_cache_file):
         with open(exif_cache_file, 'r') as file:
-        #with open("c:\\tools\\ai\\stable-diffusion-webui\\extensions\\stable-diffusion-webui-images-browser\\test.json ", 'r') as file:
             exif_cache = json.load(file)
         
         for file, info in exif_cache.items():
+            file = os.path.realpath(file)
             update_exif_data(cursor, file, info)
     
     return
@@ -194,10 +203,12 @@ def migrate_ranking(cursor):
             ranking = json.load(file)
         for file, info in ranking.items():
             if info != "None":
+                file = os.path.realpath(file)
+                name = os.path.basename(file)
                 cursor.execute('''
-                INSERT INTO ranking (file, ranking)
-                VALUES (?, ?)
-                ''', (file, info))
+                INSERT INTO ranking (file, name, ranking)
+                VALUES (?, ?, ?)
+                ''', (file, name, info))
 
     return
 
@@ -210,17 +221,150 @@ def update_db_data(cursor, key, value):
     
     return
 
+def get_version():
+    with sqlite3.connect(db_file, timeout=timeout) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT value
+        FROM db_data
+        WHERE key = 'version'
+        ''',)
+        db_version = cursor.fetchone()
+    
+    return db_version
+
+def migrate_path_recorder_dirs(cursor):
+    cursor.execute('''
+    SELECT path, path_display
+    FROM path_recorder
+    ''')
+    for (path, path_display) in cursor.fetchall():
+        real_path = os.path.realpath(path)
+        if path != real_path:
+            update_from = path
+            update_to = real_path
+            try:
+                cursor.execute('''
+                UPDATE path_recorder
+                SET path = ?,
+                    path_display = ? || SUBSTR(path_display, LENGTH(?) + 1)
+                WHERE path = ?
+                ''', (update_to, update_to, update_from, update_from))
+            except sqlite3.IntegrityError as e:
+                # these are double keys, because the same file can be in the db with different path notations
+                (e_msg,) = e.args
+                if e_msg.startswith("UNIQUE constraint"):
+                    cursor.execute('''
+                    DELETE FROM path_recorder
+                    WHERE path = ?
+                    ''', (update_from,))
+                else:
+                    raise
+
+    return
+
+def migrate_exif_data_dirs(cursor):
+    cursor.execute('''
+    SELECT file
+    FROM exif_data
+    ''')
+    for (filepath,) in cursor.fetchall():
+        (path, file) = os.path.split(filepath)
+        real_path = os.path.realpath(path)
+        if path != real_path:
+            update_from = filepath
+            update_to = os.path.join(real_path, file)
+            try:
+                cursor.execute('''
+                UPDATE exif_data
+                SET file = ?
+                WHERE file = ?
+                ''', (update_to, update_from))
+            except sqlite3.IntegrityError as e:
+                # these are double keys, because the same file can be in the db with different path notations
+                (e_msg,) = e.args
+                if e_msg.startswith("UNIQUE constraint"):
+                    cursor.execute('''
+                    DELETE FROM exif_data
+                    WHERE file = ?
+                    ''', (update_from,))
+                else:
+                    raise
+
+    return
+
+def migrate_ranking_dirs(cursor, db_version):
+    if db_version == "1":
+        cursor.execute('''
+        ALTER TABLE ranking
+        ADD COLUMN name TEXT
+        ''')
+
+        cursor.execute('''
+            CREATE INDEX IF NOT EXISTS ranking_name ON ranking (name)
+        ''')
+
+    cursor.execute('''
+    SELECT file, ranking 
+    FROM ranking
+    ''')
+    for (filepath, ranking) in cursor.fetchall():
+        if filepath == "" or ranking == "None":
+            cursor.execute('''
+            DELETE FROM ranking
+            WHERE file = ?
+            ''', (filepath,))
+        else:
+            (path, file) = os.path.split(filepath)
+            real_path = os.path.realpath(path)
+            name = file
+            update_from = filepath
+            update_to = os.path.join(real_path, file)
+            try:
+                cursor.execute('''
+                UPDATE ranking
+                SET file = ?,
+                    name = ?
+                WHERE file = ?
+                ''', (update_to, name, update_from))
+            except sqlite3.IntegrityError as e:
+                # these are double keys, because the same file can be in the db with different path notations
+                (e_msg,) = e.args
+                if e_msg.startswith("UNIQUE constraint"):
+                    cursor.execute('''
+                    DELETE FROM ranking
+                    WHERE file = ?
+                    ''', (update_from,))
+                else:
+                    raise
+
+    return
+
 def check():
     if not os.path.exists(db_file):
+        print("Image Browser: Creating database")
         conn, cursor = transaction_begin()
         create_db(cursor)
-        update_db_data(cursor, "version", "1")
+        update_db_data(cursor, "version", version)
         migrate_path_recorder(cursor)
         migrate_exif_data(cursor)
         migrate_ranking(cursor)
         transaction_end(conn, cursor)
+        print("Image Browser: Database created")
+    db_version = get_version()
+    if db_version[0] <= "2":
+        # version 1 database had mixed path notations, changed them all to abspath
+        # version 2 database still had mixed path notations, because of windows short name, changed them all to realpath
+        print(f"Image Browser: Upgrading database from version {db_version[0]} to version {version}")
+        conn, cursor = transaction_begin()
+        update_db_data(cursor, "version", version)
+        migrate_path_recorder_dirs(cursor)
+        migrate_exif_data_dirs(cursor)
+        migrate_ranking_dirs(cursor, db_version[0])
+        transaction_end(conn, cursor)
+        print(f"Image Browser: Database upgraded from version {db_version[0]} to version {version}")
 
-    return
+    return version
 
 def load_path_recorder():
     with sqlite3.connect(db_file, timeout=timeout) as conn:
@@ -234,28 +378,54 @@ def load_path_recorder():
     return path_recorder
 
 def select_ranking(filename):
-    with sqlite3.connect(db_file, timeout=timeout) as conn:
-        cursor = conn.cursor()
+    conn, cursor = transaction_begin()
+    cursor.execute('''
+    SELECT ranking
+    FROM ranking
+    WHERE file = ?
+    ''', (filename,))
+    ranking_value = cursor.fetchone()
+    
+    # if ranking not found search again, without path (moved?)
+    if ranking_value is None:
+        name = os.path.basename(filename)
         cursor.execute('''
         SELECT ranking
         FROM ranking
-        WHERE file = ?
-        ''', (filename,))
+        WHERE name = ?
+        ''', (name,))
         ranking_value = cursor.fetchone()
-
+        # and insert with current filepath
+        if ranking_value is not None:
+            (insert_ranking,) = ranking_value
+            cursor.execute('''
+            INSERT INTO ranking (file, name, ranking)
+            VALUES (?, ?, ?)
+            ''', (filename, name, insert_ranking))
+    
     if ranking_value is None:
-        ranking_value = ["0"]
-    return ranking_value[0]
+        return_ranking = "None"
+    else:
+        (return_ranking,) = ranking_value
+    transaction_end(conn, cursor)
+    
+    return return_ranking
 
 def update_ranking(file, ranking):
-    if ranking != "0":
-        with sqlite3.connect(db_file, timeout=timeout) as conn:
-            cursor = conn.cursor()
-            cursor.execute('''
-            INSERT OR REPLACE
-            INTO ranking (file, ranking)
-            VALUES (?, ?)
-            ''', (file, ranking))
+    name = os.path.basename(file)
+    with sqlite3.connect(db_file, timeout=timeout) as conn:
+        cursor = conn.cursor()
+        if ranking == "None":
+                cursor.execute('''
+                DELETE FROM ranking
+                WHERE name = ?
+                ''', (name,))
+        else:
+                cursor.execute('''
+                INSERT OR REPLACE
+                INTO ranking (file, name, ranking)
+                VALUES (?, ?, ?)
+                ''', (file, name, ranking))
     
     return
 
@@ -280,6 +450,38 @@ def delete_path_recorder(path):
     
     return
 
+def update_path_recorder_mult(cursor, update_from, update_to):
+    cursor.execute('''
+    UPDATE path_recorder
+    SET path = ?,
+        path_display = ? || SUBSTR(path_display, LENGTH(?) + 1)
+    WHERE path = ?
+    ''', (update_to, update_to, update_from, update_from))
+
+    return
+
+def update_exif_data_mult(cursor, update_from, update_to):
+    update_from = update_from + os.path.sep
+    update_to = update_to + os.path.sep
+    cursor.execute('''
+    UPDATE exif_data
+    SET file = ? || SUBSTR(file, LENGTH(?) + 1)
+    WHERE file like ? || '%'
+    ''', (update_to, update_from, update_from))
+
+    return
+
+def update_ranking_mult(cursor, update_from, update_to):
+    update_from = update_from + os.path.sep
+    update_to = update_to + os.path.sep
+    cursor.execute('''
+    UPDATE ranking
+    SET file = ? || SUBSTR(file, LENGTH(?) + 1)
+    WHERE file like ? || '%'
+    ''', (update_to, update_from, update_from))
+
+    return
+
 def transaction_begin():
     conn = sqlite3.connect(db_file, timeout=timeout)
     conn.isolation_level = None
@@ -302,6 +504,28 @@ def update_aes_data(cursor, file, value):
     ''', (file, key, value))
 
     return
+
+def select_prompts(file):
+    with sqlite3.connect(db_file, timeout=timeout) as conn:
+        cursor = conn.cursor()
+        cursor.execute('''
+        SELECT key, value
+        FROM exif_data
+        WHERE file = ?
+          AND KEY in ('prompt', 'negative_prompt')
+        ''', (file,))
+
+        rows = cursor.fetchall()
+    prompt = ""
+    neg_prompt = ""
+    for row in rows:
+        (key, value) = row
+        if key == 'prompt':
+            prompt = value
+        elif key == 'negative_prompt':
+            neg_prompt = value
+
+    return prompt, neg_prompt
 
 def load_exif_data(exif_cache):
     with sqlite3.connect(db_file, timeout=timeout) as conn:

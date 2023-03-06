@@ -17,6 +17,12 @@ and restart your stable-diffusion-webui, then you can see the new tab "Image Bro
 Please be aware that when scanning a directory for the first time, the png-cache will be built. This can take several minutes, depending on the amount of images.
 
 ## Recent updates
+- Send to openOutpaint
+- Regex search
+- Maximum aesthetic_score filter
+- Save ranking to EXIF option
+- Maintenance tab
+- Custom tabs
 - Copy/Move to directory
 - Keybindings
 - Additional sorting and filtering by EXIF data including .txt file information
