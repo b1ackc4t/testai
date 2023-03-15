@@ -17,12 +17,9 @@ import modules.ui
 from modules import paths, shared, script_callbacks, scripts, images
 from modules.shared import opts, cmd_opts
 from modules.ui_common import plaintext_to_html
-from modules.ui_components import ToolButton
+from modules.ui_components import ToolButton, DropdownMulti
 from scripts.wib import wib_db
-from PIL import Image
-from PIL.ExifTags import TAGS
-from PIL.JpegImagePlugin import JpegImageFile
-from PIL.PngImagePlugin import PngImageFile
+from PIL import Image, UnidentifiedImageError
 from pathlib import Path
 from typing import List, Tuple
 from itertools import chain
@@ -45,6 +42,8 @@ try:
 except AttributeError:
     tabs_list.append("Maintenance")  # mandatory tab
 
+components_list = ["Sort by", "Filename keyword search", "EXIF keyword search", "Ranking Filter", "Aesthestic Score", "Generation Info", "File Name", "File Time", "Open Folder", "Send to buttons", "Copy to directory", "Gallery Controls Bar", "Ranking Bar", "Delete Bar", "Additional Generation Info"]
+
 num_of_imgs_per_page = 0
 loads_files_num = 0
 image_ext_list = [".png", ".jpg", ".jpeg", ".bmp", ".gif", ".webp"]
@@ -64,6 +63,7 @@ copy_move = ["Move", "Copy"]
 copied_moved = ["Moved", "Copied"]
 np = "negative_prompt: "
 openoutpaint = False
+controlnet = False
 
 path_maps = {
     "txt2img": opts.outdir_samples or opts.outdir_txt2img_samples,
@@ -276,38 +276,40 @@ def save_image(file_name, filenames, page_index, turn_page_switch, dest_path):
 
     return message, filenames, page_index, turn_page_switch
 
-def delete_image(delete_num, name, filenames, image_index, visible_num):
+def delete_image(delete_num, name, filenames, image_index, visible_num, delete_confirm, turn_page_switch):
     if name == "":
         return filenames, delete_num
+
+    delete_num = int(delete_num)
+    image_index = int(image_index)
+    visible_num = int(visible_num)
+    index = list(filenames).index(name)
+    new_file_list = filenames[:index] + filenames[index + delete_num:]
+
+    if not delete_confirm:
+        delete_num = min(visible_num - image_index, delete_num)
+
+    if delete_num > 1:
+        # Force refresh page when done, no special js handling necessary
+        turn_page_switch = -turn_page_switch
+        delete_state = False
     else:
-        delete_num = int(delete_num)
-        visible_num = int(visible_num)
-        image_index = int(image_index)
-        index = list(filenames).index(name)
-        i = 0
-        new_file_list = []
-        for name in filenames:
-            if i >= index and i < index + delete_num:
-                if os.path.exists(name):
-                    if visible_num == image_index:
-                        new_file_list.append(name)
-                        i += 1
-                        continue
-                    if opts.image_browser_delete_message:
-                        print(f"Deleting file {name}")
-                    delete_state = True
-                    delete_recycle(name)
-                    visible_num -= 1
-                    if opts.image_browser_txt_files:
-                        txt_file = totxt(name)
-                        if os.path.exists(txt_file):
-                            delete_recycle(txt_file)
-                else:
-                    print(f"File does not exist {name}")
-            else:
-                new_file_list.append(name)
-            i += 1
-    return new_file_list, 1, visible_num, delete_state
+        delete_state = True
+
+    for i in range(index, index + delete_num):
+        if os.path.exists(filenames[i]):
+            if opts.image_browser_delete_message:
+                print(f"Deleting file {filenames[i]}")
+            delete_recycle(filenames[i])
+            visible_num -= 1
+            if opts.image_browser_txt_files:
+                txt_file = totxt(filenames[i])
+                if os.path.exists(txt_file):
+                    delete_recycle(txt_file)
+        else:
+            print(f"File does not exist {filenames[i]}")
+
+    return new_file_list, 1, delete_state, turn_page_switch, visible_num
 
 def traverse_all_files(curr_path, image_list, tab_base_tag_box, img_path_depth) -> List[Tuple[str, os.stat_result, str, int]]:
     global current_depth
@@ -354,24 +356,27 @@ def cache_exif(fileinfos):
                 exif_cache[fi_info[0]] = "0"
                 finfo_aes[fi_info[0]] = "0"
                 aes_cache[fi_info[0]] = "0"
-                if fi_info[0].endswith(image_ext_list[3]) or fi_info[0].endswith(image_ext_list[4]) or fi_info[0].endswith(image_ext_list[5]):
+                try:
+                    image = Image.open(fi_info[0])
+                    (_, allExif, allExif_html) = modules.extras.run_pnginfo(image)
+                    image.close()
+                except SyntaxError:
                     allExif = False
-                else:
-                    try:
-                        if fi_info[0].endswith(image_ext_list[0]):
-                            image = PngImageFile(fi_info[0])
-                        else:
-                            image = JpegImageFile(fi_info[0])
-                        try:
-                            allExif = modules.extras.run_pnginfo(image)[1]
-                        except OSError as e:
-                            if e.errno == 22:
-                                logger.warning(f"Caught OSError with error code 22: {fi_info[0]}")
-                            else:
-                                raise
-                    except SyntaxError:
-                        allExif = False
-                        logger.warning(f"Extension and content don't match: {fi_info[0]}")
+                    logger.warning(f"Extension and content don't match: {fi_info[0]}")
+                except UnidentifiedImageError as e:
+                    allExif = False
+                    logger.warning(f"UnidentifiedImageError: {e}")
+                except Image.DecompressionBombError as e:
+                    allExif = False
+                    logger.warning(f"DecompressionBombError: {e}: {fi_info[0]}")
+                except PermissionError as e:
+                    allExif = False
+                    logger.warning(f"PermissionError: {e}: {fi_info[0]}")
+                except OSError as e:
+                    if e.errno == 22:
+                        logger.warning(f"Caught OSError with error code 22: {fi_info[0]}")
+                    else:
+                        raise
                 if allExif:
                     finfo_exif[fi_info[0]] = allExif
                     exif_cache[fi_info[0]] = allExif
@@ -407,7 +412,7 @@ def cache_exif(fileinfos):
                         wib_db.update_aes_data(conn, fi_info[0], aes_value)
                         new_aes = new_aes + 1
                     except Exception:
-                        logger.warning(f"No EXIF in image or txt file for {fi_info[0]}")
+                        logger.warning(f"cache_exif: No EXIF in image or txt file for {fi_info[0]}")
                         # Saved with defaults to not scan it again next time
                         finfo_exif[fi_info[0]] = "0"
                         exif_cache[fi_info[0]] = "0"
@@ -455,6 +460,22 @@ def exif_rebuild(maint_wait):
 
     return maint_wait, maint_last_msg
 
+def exif_delete_0(maint_wait):
+    global finfo_exif, exif_cache, finfo_aes, aes_cache
+    if opts.image_browser_scan_exif:
+        conn, cursor = wib_db.transaction_begin()
+        wib_db.delete_exif_0(cursor)
+        wib_db.transaction_end(conn, cursor)
+        finfo_aes = {}
+        finfo_exif = {}
+        exif_cache = wib_db.load_exif_data(exif_cache)
+        aes_cache = wib_db.load_aes_data(aes_cache)
+        maint_last_msg = "Delete finished"
+    else:
+        maint_last_msg = "Exif cache not enabled in settings"
+
+    return maint_wait, maint_last_msg
+
 def exif_update_dirs(maint_update_dirs_from, maint_update_dirs_to, maint_wait):
     global exif_cache, aes_cache
     if maint_update_dirs_from == "":
@@ -477,6 +498,48 @@ def exif_update_dirs(maint_update_dirs_from, maint_update_dirs_to, maint_wait):
             maint_last_msg = "No rows updated"
         else:
             maint_last_msg = f"{rows} rows updated. Please reload UI!"
+
+    return maint_wait, maint_last_msg
+
+def reapply_ranking(path_recorder, maint_wait):
+    dirs = {}
+
+    for tab in tabs_list:
+        if os.path.exists(tab.path):
+            dirs[tab.path] = tab.path
+
+    for key in path_recorder:
+        if os.path.exists(key):
+            dirs[key] = key
+
+    conn, cursor = wib_db.transaction_begin()
+
+    # Traverse all known dirs, check if missing rankings are due to moved files
+    for key in dirs.keys():
+        fileinfos = traverse_all_files(key, [], "", 0)
+        for (file, _) in fileinfos:
+            # Is there a ranking for this full filepath
+            ranking_by_file = wib_db.get_ranking_by_file(cursor, file)
+            if ranking_by_file is None:
+                name = os.path.basename(file)
+                (ranking_by_name, alternate_hash) = wib_db.get_ranking_by_name(cursor, name)
+                # Is there a ranking only for the filename
+                if ranking_by_name is not None:
+                    hash = wib_db.get_hash(file)
+                    (alternate_file, alternate_ranking) = ranking_by_name
+                    if alternate_ranking is not None:
+                        (alternate_hash,) = alternate_hash
+                    # Does the found filename's file have no hash or the same hash?
+                    if alternate_hash is None or hash == alternate_hash:
+                        if os.path.exists(alternate_file):
+                            # Insert ranking as a copy of the found filename's ranking
+                            wib_db.insert_ranking(cursor, file, alternate_ranking, hash)
+                        else:
+                            # Replace ranking of the found filename
+                            wib_db.replace_ranking(cursor, file, alternate_file, hash)
+
+    wib_db.transaction_end(conn, cursor)
+    maint_last_msg = "Rankings reapplied"
 
     return maint_wait, maint_last_msg
 
@@ -547,66 +610,64 @@ def get_all_images(dir_name, sort_by, sort_order, keyword, tab_base_tag_box, img
     if len(keyword) != 0:
         fileinfos = [x for x in fileinfos if keyword.lower() in x[0].lower()]
         filenames = [finfo[0] for finfo in fileinfos]
-    if len(exif_keyword) != 0:
-        if use_regex:
-            regex_error = False
-            try:
-                test_re = re.compile(exif_keyword, re.DOTALL)
-            except re.error as e:
-                regex_error = True
-                print(f"Regex error: {e}")
-        if (use_regex and not regex_error) or not use_regex:
-            if negative_prompt_search == "Yes":
-                fileinfos = [x for x in fileinfos if exif_search(exif_keyword, finfo_exif[x[0]], use_regex, case_sensitive)]
-            else:
-                result = []
-                for file_info in fileinfos:
-                    file_name = file_info[0]
-                    file_exif = finfo_exif[file_name]
-                    file_exif_lc = file_exif.lower()
-                    start_index = file_exif_lc.find(np)
-                    end_index = file_exif.find("\n", start_index)
-                    if negative_prompt_search == "Only":
-                        start_index = start_index + len(np)
-                        sub_string = file_exif[start_index:end_index].strip()
-                        if exif_search(exif_keyword, sub_string, use_regex, case_sensitive):
-                            result.append(file_info)
-                    else:
-                        sub_string = file_exif[start_index:end_index].strip()
-                        file_exif = file_exif.replace(sub_string, "")
-                        
-                        if exif_search(exif_keyword, file_exif, use_regex, case_sensitive):
-                            result.append(file_info)
-                fileinfos = result
-            filenames = [finfo[0] for finfo in fileinfos]
-    if len(aes_filter_min) != 0 or len(aes_filter_max) != 0:
-        try:
-            aes_filter_min_num = float(aes_filter_min)
-        except ValueError:
-            aes_filter_min_num = 0
-        try:
-            aes_filter_max_num = float(aes_filter_max)
-        except ValueError:
-            aes_filter_max_num = 0
-        if aes_filter_min_num < 0:
-            aes_filter_min_num = 0
-        if aes_filter_max_num <= 0:
-            aes_filter_max_num = sys.maxsize
-
-        aes_fileinfos = []
-        for x in fileinfos:
-            if finfo_aes.get(x[0]):
+    
+    if opts.image_browser_scan_exif:
+        conn, cursor = wib_db.transaction_begin()
+        if len(exif_keyword) != 0:
+            if use_regex:
+                regex_error = False
                 try:
-                    aes_value = float(finfo_aes[x[0]])
-                except ValueError:
-                    aes_value = 0
-                if aes_value >= aes_filter_min_num and aes_value <= aes_filter_max_num:
-                    aes_fileinfos.append(x)
-        fileinfos = aes_fileinfos
-        filenames = [finfo[0] for finfo in fileinfos]   
-    if ranking_filter != "All":
-        fileinfos = [x for x in fileinfos if get_ranking(x[0]) in ranking_filter]
-        filenames = [finfo[0] for finfo in fileinfos]
+                    test_re = re.compile(exif_keyword, re.DOTALL)
+                except re.error as e:
+                    regex_error = True
+                    print(f"Regex error: {e}")
+            if (use_regex and not regex_error) or not use_regex:
+                if negative_prompt_search == "Yes":
+                    fileinfos = [x for x in fileinfos if exif_search(exif_keyword, finfo_exif[x[0]], use_regex, case_sensitive)]
+                else:
+                    result = []
+                    for file_info in fileinfos:
+                        file_name = file_info[0]
+                        file_exif = finfo_exif[file_name]
+                        file_exif_lc = file_exif.lower()
+                        start_index = file_exif_lc.find(np)
+                        end_index = file_exif.find("\n", start_index)
+                        if negative_prompt_search == "Only":
+                            start_index = start_index + len(np)
+                            sub_string = file_exif[start_index:end_index].strip()
+                            if exif_search(exif_keyword, sub_string, use_regex, case_sensitive):
+                                result.append(file_info)
+                        else:
+                            sub_string = file_exif[start_index:end_index].strip()
+                            file_exif = file_exif.replace(sub_string, "")
+                            
+                            if exif_search(exif_keyword, file_exif, use_regex, case_sensitive):
+                                result.append(file_info)
+                    fileinfos = result
+                filenames = [finfo[0] for finfo in fileinfos]
+        wib_db.fill_work_files(cursor, fileinfos)
+        if len(aes_filter_min) != 0 or len(aes_filter_max) != 0:
+            try:
+                aes_filter_min_num = float(aes_filter_min)
+            except ValueError:
+                aes_filter_min_num = 0
+            try:
+                aes_filter_max_num = float(aes_filter_max)
+            except ValueError:
+                aes_filter_max_num = 0
+            if aes_filter_min_num < 0:
+                aes_filter_min_num = 0
+            if aes_filter_max_num <= 0:
+                aes_filter_max_num = sys.maxsize
+
+            fileinfos = wib_db.filter_aes(cursor, fileinfos, aes_filter_min_num, aes_filter_max_num)
+            filenames = [finfo[0] for finfo in fileinfos]   
+        if ranking_filter != "All":
+            fileinfos = wib_db.filter_ranking(cursor, fileinfos, ranking_filter)
+            filenames = [finfo[0] for finfo in fileinfos]
+        
+        wib_db.transaction_end(conn, cursor)
+    
     if sort_by == "date":
         if sort_order == up_symbol:
             fileinfos = sorted(fileinfos, key=lambda x: x[1].st_mtime)
@@ -701,10 +762,21 @@ def show_image_info(tab_base_tag_box, num, page_index, filenames, turn_page_swit
         turn_page_switch = -turn_page_switch
         file = None
         tm =  None
+        info = ""
     else:
-        file = filenames[int(num) + int((page_index - 1) * num_of_imgs_per_page)]
-        tm =   "<div style='color:#999' align='right'>" + time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(os.path.getmtime(file))) + "</div>"
-    return file, tm, num, file, turn_page_switch
+        file_num = int(num) + int((page_index - 1) * num_of_imgs_per_page)
+        if file_num >= len(filenames):
+            # Last image to the right is deleted, page refresh
+            turn_page_switch = -turn_page_switch
+            file = None
+            tm =  None
+            info = ""
+        else:
+            file = filenames[file_num]
+            tm =   "<div style='color:#999' align='right'>" + time.strftime("%Y-%m-%d %H:%M:%S",time.localtime(os.path.getmtime(file))) + "</div>"
+            with Image.open(file) as image:
+                _, geninfo, info = modules.extras.run_pnginfo(image)
+    return file, tm, num, file, turn_page_switch, info
 
 def change_dir(img_dir, path_recorder, load_switch, img_path_browser, img_path_depth, img_path):
     warning = None
@@ -766,7 +838,7 @@ def update_ranking(img_file_name, ranking, img_file_info):
     return img_file_info
             
 def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
-    global init, exif_cache, aes_cache, openoutpaint
+    global init, exif_cache, aes_cache, openoutpaint, controlnet
     dir_name = None
     others_dir = False
     maint = False
@@ -784,6 +856,7 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
     
     path_recorder, path_recorder_formatted, path_recorder_unformatted = read_path_recorder()
     openoutpaint = check_ext("openoutpaint")
+    controlnet = check_ext("controlnet")
 
     if tab.name == "Others":
         others_dir = True
@@ -830,60 +903,71 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
         with gr.Column():  
             with gr.Row():    
                 with gr.Column(scale=2):    
-                    with gr.Row():       
+                    with gr.Row() as gallery_controls_panel:
                         first_page = gr.Button('First Page')
                         prev_page = gr.Button('Prev Page', elem_id=f"{tab.base_tag}_image_browser_prev_page")
                         page_index = gr.Number(value=1, label="Page Index")
                         refresh_index_button = ToolButton(value=refresh_symbol)
                         next_page = gr.Button('Next Page', elem_id=f"{tab.base_tag}_image_browser_next_page")
                         end_page = gr.Button('End Page') 
-                    with gr.Row():
+                    with gr.Row() as ranking_panel:
                         ranking = gr.Radio(value="None", choices=["1", "2", "3", "4", "5", "None"], label="ranking", elem_id=f"{tab.base_tag}_image_browser_ranking", interactive=True, visible=False)
                     with gr.Row():
                         image_gallery = gr.Gallery(show_label=False, elem_id=f"{tab.base_tag}_image_browser_gallery").style(grid=opts.image_browser_page_columns,height=("auto" if opts.image_browser_height_auto else None))
                     with gr.Row() as delete_panel:
                         with gr.Column(scale=1):
                             delete_num = gr.Number(value=1, interactive=True, label="delete next")
+                            delete_confirm = gr.Checkbox(value=False, label="also delete off-screen images")
                         with gr.Column(scale=3):
                             delete = gr.Button('Delete', elem_id=f"{tab.base_tag}_image_browser_del_img_btn")
+                    with gr.Row() as info_add_panel:
+                        with gr.Accordion("Additional Generation Info", open=False):
+                            img_file_info_add = gr.HTML()
 
                 with gr.Column(scale=1): 
-                    with gr.Row(scale=0.5):
-                        sort_by = gr.Dropdown(value="date", choices=["path name", "date", "aesthetic_score", "random", "cfg scale", "steps", "seed", "sampler", "size", "model", "model hash", "ranking"], label="sort by")
+                    with gr.Row(scale=0.5) as sort_panel:
+                        sort_by = gr.Dropdown(value="date", choices=["path name", "date", "aesthetic_score", "random", "cfg scale", "steps", "seed", "sampler", "size", "model", "model hash", "ranking"], label="Sort by")
                         sort_order = ToolButton(value=down_symbol)
-                    with gr.Row():
-                        keyword = gr.Textbox(value="", label="filename keyword")
-                    with gr.Box():
+                    with gr.Row() as filename_search_panel:
+                        filename_keyword_search = gr.Textbox(value="", label="Filename keyword search")
+                    with gr.Box() as exif_search_panel:
                         with gr.Row():
-                                exif_keyword = gr.Textbox(value="", label="exif keyword")
+                                exif_keyword_search = gr.Textbox(value="", label="EXIF keyword search")
                                 negative_prompt_search = gr.Radio(value="No", choices=["No", "Yes", "Only"], label="Search negative prompt", interactive=True)
                         with gr.Row():
                                 case_sensitive = gr.Checkbox(value=False, label="case sensitive")
                                 use_regex = gr.Checkbox(value=False, label=r"regex - e.g. ^(?!.*Hires).*$")
-                    with gr.Column():
-                        ranking_filter = gr.Radio(value="All", choices=["All", "1", "2", "3", "4", "5", "None"], label="ranking filter", interactive=True)
-                    with gr.Row():  
-                        aes_filter_min = gr.Textbox(value="", label="minimum aesthetic_score")
-                        aes_filter_max = gr.Textbox(value="", label="maximum aesthetic_score")
-                    with gr.Row():
-                        img_file_info = gr.Textbox(label="Generate Info", interactive=False, lines=6)
-                    with gr.Row():
+                    with gr.Column() as ranking_filter_panel:
+                        ranking_filter = gr.Radio(value="All", choices=["All", "1", "2", "3", "4", "5", "None"], label="Ranking filter", interactive=True)
+                    with gr.Row() as aesthetic_score_filter_panel:
+                        aes_filter_min = gr.Textbox(value="", label="Minimum aesthetic_score")
+                        aes_filter_max = gr.Textbox(value="", label="Maximum aesthetic_score")
+                    with gr.Row() as generation_info_panel:
+                        img_file_info = gr.Textbox(label="Generation Info", interactive=False, lines=6)
+                    with gr.Row() as filename_panel:
                         img_file_name = gr.Textbox(value="", label="File Name", interactive=False)
-                    with gr.Row():
+                    with gr.Row() as filetime_panel:
                         img_file_time= gr.HTML()
-                    with gr.Row():
+                    with gr.Row() as open_folder_panel:
                         open_folder_button = gr.Button(folder_symbol, visible=standard_ui or others_dir)
                         gr.HTML("&nbsp")
                         gr.HTML("&nbsp")
                         gr.HTML("&nbsp")
                     with gr.Row(elem_id=f"{tab.base_tag}_image_browser_button_panel", visible=False) as button_panel:
-                        if tab.name != favorite_tab_name:
-                            favorites_btn = gr.Button(f'{copy_move[opts.image_browser_copy_image]} to favorites', elem_id=f"{tab.base_tag}_image_browser_favorites_btn")
-                        try:
-                            send_to_buttons = modules.generation_parameters_copypaste.create_buttons(["txt2img", "img2img", "inpaint", "extras"])
-                        except:
-                            pass
-                        sendto_openoutpaint = gr.Button("Send to openOutpaint", elem_id=f"{tab.base_tag}_image_browser_openoutpaint_btn", visible=openoutpaint)
+                        with gr.Column():
+                            with gr.Row():
+                                if tab.name != favorite_tab_name:
+                                    favorites_btn = gr.Button(f'{copy_move[opts.image_browser_copy_image]} to favorites', elem_id=f"{tab.base_tag}_image_browser_favorites_btn")
+                                try:
+                                    send_to_buttons = modules.generation_parameters_copypaste.create_buttons(["txt2img", "img2img", "inpaint", "extras"])
+                                except:
+                                    pass
+                                sendto_openoutpaint = gr.Button("Send to openOutpaint", elem_id=f"{tab.base_tag}_image_browser_openoutpaint_btn", visible=openoutpaint)
+                            with gr.Row(visible=controlnet):
+                                sendto_controlnet_txt2img = gr.Button("Send to txt2img ControlNet", visible=controlnet)
+                                sendto_controlnet_img2img = gr.Button("Send to img2img ControlNet", visible=controlnet)
+                                controlnet_max = opts.data.get("control_net_max_models_num", 1)
+                                sendto_controlnet_num = gr.Dropdown(list(range(controlnet_max)), label="ControlNet number", value="0", interactive=True, visible=(controlnet and controlnet_max > 1))
                     with gr.Row(elem_id=f"{tab.base_tag}_image_browser_to_dir_panel", visible=False) as to_dir_panel:
                         with gr.Box():
                             with gr.Row():
@@ -937,7 +1021,9 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
         maint_last_msg = gr.Textbox(label="Last message", interactive=False)
     with gr.Row(visible=maint): 
         with gr.Column(scale=1):
-            maint_rebuild = gr.Button(value="Rebuild exif cache")
+            maint_exif_rebuild = gr.Button(value="Rebuild exif cache")
+        with gr.Column(scale=1):
+            maint_exif_delete_0 = gr.Button(value="Delete 0-entries from exif cache")
         with gr.Column(scale=10):
             gr.HTML(visible=False)
     with gr.Row(visible=maint): 
@@ -947,11 +1033,44 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
             maint_update_dirs_from = gr.Textbox(label="From (full path)")
         with gr.Column(scale=10):
             maint_update_dirs_to = gr.Textbox(label="to (full path)")
+    with gr.Row(visible=maint): 
+        with gr.Column(scale=1):
+            maint_reapply_ranking = gr.Button(value="Reapply ranking after moving files")
+        with gr.Column(scale=10):
+            gr.HTML(visible=False)
     with gr.Row(visible=False): 
         with gr.Column(scale=1):
             maint_rebuild_ranking = gr.Button(value="Rebuild ranking from exif info")
         with gr.Column(scale=10):
             gr.HTML(visible=False)
+
+    # Hide components based on opts.image_browser_hidden_components
+    hidden_component_map = {
+        "Sort by": sort_panel,
+        "Filename keyword search": filename_search_panel,
+        "EXIF keyword search": exif_search_panel,
+        "Ranking Filter": ranking_filter_panel,
+        "Aesthestic Score": aesthetic_score_filter_panel,
+        "Generation Info": generation_info_panel,
+        "File Name": filename_panel,
+        "File Time": filetime_panel,
+        "Open Folder": open_folder_panel,
+        "Send to buttons": button_panel,
+        "Copy to directory": to_dir_panel,
+        "Gallery Controls Bar": gallery_controls_panel,
+        "Ranking Bar": ranking_panel,
+        "Delete Bar": delete_panel,
+        "Additional Generation Info": info_add_panel
+    }
+
+    if set(hidden_component_map.keys()) != set(components_list):
+        logger.warning(f"Invalid items present in either hidden_component_map or components_list. Make sure when adding new components they are added to both.")
+
+    override_hidden = set()
+    if hasattr(opts, "image_browser_hidden_components"):
+        for item in opts.image_browser_hidden_components:
+            hidden_component_map[item].visible = False
+            override_hidden.add(hidden_component_map[item])
 
     change_dir_outputs = [warning_box, main_panel, img_path_browser, path_recorder, load_switch, img_path, img_path_depth]
     img_path.submit(change_dir, inputs=[img_path, path_recorder, load_switch, img_path_browser, img_path_depth, img_path], outputs=change_dir_outputs)
@@ -960,7 +1079,7 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
     to_dir_saved.change(change_dir, inputs=[to_dir_saved, path_recorder, to_dir_load_switch, to_dir_saved, img_path_depth, to_dir_path], outputs=[warning_box, main_panel, to_dir_saved, path_recorder, to_dir_load_switch, to_dir_path, img_path_depth])
 
     #delete
-    delete.click(delete_image, inputs=[delete_num, img_file_name, filenames, image_index, visible_img_num], outputs=[filenames, delete_num, visible_img_num, delete_state])
+    delete.click(delete_image, inputs=[delete_num, img_file_name, filenames, image_index, visible_img_num, delete_confirm, turn_page_switch], outputs=[filenames, delete_num, delete_state, turn_page_switch, visible_img_num])
     delete.click(fn=None, _js="image_browser_delete", inputs=[delete_num, tab_base_tag_box, image_index], outputs=None) 
     if tab.name == favorite_tab_name:
         img_file_name.change(fn=update_move_text_one, inputs=[to_dir_btn], outputs=[to_dir_btn])
@@ -975,8 +1094,8 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
     prev_page.click(lambda p, s: (p - 1, -s), inputs=[page_index, turn_page_switch], outputs=[page_index, turn_page_switch])
     end_page.click(lambda s: (-1, -s), inputs=[turn_page_switch], outputs=[page_index, turn_page_switch])    
     load_switch.change(lambda s:(1, -s), inputs=[turn_page_switch], outputs=[page_index, turn_page_switch])
-    keyword.submit(lambda s:(1, -s), inputs=[turn_page_switch], outputs=[page_index, turn_page_switch])
-    exif_keyword.submit(lambda s:(1, -s), inputs=[turn_page_switch], outputs=[page_index, turn_page_switch])
+    filename_keyword_search.submit(lambda s:(1, -s), inputs=[turn_page_switch], outputs=[page_index, turn_page_switch])
+    exif_keyword_search.submit(lambda s:(1, -s), inputs=[turn_page_switch], outputs=[page_index, turn_page_switch])
     aes_filter_min.submit(lambda s:(1, -s), inputs=[turn_page_switch], outputs=[page_index, turn_page_switch])
     aes_filter_max.submit(lambda s:(1, -s), inputs=[turn_page_switch], outputs=[page_index, turn_page_switch])
     sort_by.change(lambda s:(1, -s), inputs=[turn_page_switch], outputs=[page_index, turn_page_switch])
@@ -988,11 +1107,12 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
 
     turn_page_switch.change(
         fn=get_image_page, 
-        inputs=[img_path, page_index, filenames, keyword, sort_by, sort_order, tab_base_tag_box, img_path_depth, ranking_filter, aes_filter_min, aes_filter_max, exif_keyword, negative_prompt_search, use_regex, case_sensitive, delete_state], 
+        inputs=[img_path, page_index, filenames, filename_keyword_search, sort_by, sort_order, tab_base_tag_box, img_path_depth, ranking_filter, aes_filter_min, aes_filter_max, exif_keyword_search, negative_prompt_search, use_regex, case_sensitive, delete_state], 
         outputs=[filenames, page_index, image_gallery, img_file_name, img_file_time, img_file_info, visible_img_num, warning_box, delete_state, hidden]
     )
     turn_page_switch.change(fn=None, inputs=[tab_base_tag_box], outputs=None, _js="image_browser_turnpage")
-    turn_page_switch.change(fn=lambda:(gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)), inputs=None, outputs=[delete_panel, button_panel, ranking, to_dir_panel])
+    hide_on_thumbnail_view = [delete_panel, button_panel, ranking, to_dir_panel, info_add_panel]
+    turn_page_switch.change(fn=lambda:(gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False), gr.update(visible=False)), inputs=None, outputs=hide_on_thumbnail_view)
 
     sort_order.click(
         fn=sort_order_flip,
@@ -1021,8 +1141,14 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
         inputs=[img_path, path_recorder, img_path_remove, img_path_depth],
         outputs=[path_recorder, img_path_browser]
     )
-    maint_rebuild.click(
+    maint_exif_rebuild.click(
         fn=exif_rebuild,
+        show_progress=True,
+        inputs=[maint_wait],
+        outputs=[maint_wait, maint_last_msg]
+    )
+    maint_exif_delete_0.click(
+        fn=exif_delete_0,
         show_progress=True,
         inputs=[maint_wait],
         outputs=[maint_wait, maint_last_msg]
@@ -1033,10 +1159,16 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
         inputs=[maint_update_dirs_from, maint_update_dirs_to, maint_wait],
         outputs=[maint_wait, maint_last_msg]
     )
+    maint_reapply_ranking.click(
+        fn=reapply_ranking,
+        show_progress=True,
+        inputs=[path_recorder, maint_wait],
+        outputs=[maint_wait, maint_last_msg]
+    )
 
     # other functions
-    set_index.click(show_image_info, _js="image_browser_get_current_img", inputs=[tab_base_tag_box, image_index, page_index, filenames, turn_page_switch], outputs=[img_file_name, img_file_time, image_index, hidden, turn_page_switch])
-    set_index.click(fn=lambda:(gr.update(visible=True), gr.update(visible=True), gr.update(visible=True), gr.update(visible=True)), inputs=None, outputs=[delete_panel, button_panel, ranking, to_dir_panel])
+    set_index.click(show_image_info, _js="image_browser_get_current_img", inputs=[tab_base_tag_box, image_index, page_index, filenames, turn_page_switch], outputs=[img_file_name, img_file_time, image_index, hidden, turn_page_switch, img_file_info_add])
+    set_index.click(fn=lambda:(gr.update(visible=delete_panel not in override_hidden), gr.update(visible=button_panel not in override_hidden), gr.update(visible=ranking_panel not in override_hidden), gr.update(visible=to_dir_panel not in override_hidden), gr.update(visible=info_add_panel not in override_hidden)), inputs=None, outputs=hide_on_thumbnail_view)
     img_file_name.change(fn=lambda : "", inputs=None, outputs=[collected_warning])
     img_file_name.change(get_ranking, inputs=img_file_name, outputs=ranking)
 
@@ -1075,10 +1207,22 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
             outputs=[],
             _js="image_browser_openoutpaint_send"
         )
+        sendto_controlnet_txt2img.click(
+            fn=None,
+            inputs=[tab_base_tag_box, image_index, sendto_controlnet_num],
+            outputs=[],
+            _js="image_browser_controlnet_send_txt2img"
+        )
+        sendto_controlnet_img2img.click(
+            fn=None,
+            inputs=[tab_base_tag_box, image_index, sendto_controlnet_num],
+            outputs=[],
+            _js="image_browser_controlnet_send_img2img"
+        )
 
 def run_pnginfo(image, image_path, image_file_name):
     if image is None:
-        return '', '', ''
+        return '', '', '', '', ''
     geninfo, items = images.read_info_from_image(image)
     items = {**{'parameters': geninfo}, **items}
 
@@ -1099,7 +1243,7 @@ def run_pnginfo(image, image_path, image_file_name):
                 for line in f:
                     geninfo += line
         except Exception:
-            logger.warning(f"No EXIF in image or txt file")
+            logger.warning(f"run_pnginfo: No EXIF in image or txt file")
 
     if openoutpaint:
         prompt, neg_prompt = wib_db.select_prompts(image_file_name)
@@ -1129,60 +1273,62 @@ def on_ui_tabs():
         gr.Textbox(",".join( [tab.base_tag for tab in tabs_list] ), elem_id="image_browser_tab_base_tags_list", visible=False)
     return (image_browser , "Image Browser", "image_browser"),
 
-def move_setting(options, section, added):
+def move_setting(cur_setting_name, old_setting_name, option_info, section, added):
     try:
-        old_value = shared.opts.__getattr__(options[3])
+        old_value = shared.opts.__getattr__(old_setting_name)
     except AttributeError:
         old_value = None
     try:
-        new_value = shared.opts.__getattr__(options[0])
+        new_value = shared.opts.__getattr__(cur_setting_name)
     except AttributeError:
         new_value = None
     if old_value is not None and new_value is None:
         # Add new option
-        shared.opts.add_option(options[0], shared.OptionInfo(options[1], options[2], section=section))
-        shared.opts.__setattr__(options[0], old_value)
+        shared.opts.add_option(cur_setting_name, shared.OptionInfo(*option_info, section=section))
+        shared.opts.__setattr__(cur_setting_name, old_value)
         added = added + 1
         # Remove old option
-        shared.opts.data.pop(options[3], None)
+        shared.opts.data.pop(old_setting_name, None)
 
     return added
 
 def on_ui_settings():
-    image_browser_options = []
-    # [current setting_name], [default], [label], [old setting_name]
+    # [current setting_name], [old setting_name], [default], [label], [component], [component_args]
     active_tabs_description = f"List of active tabs (separated by commas). Available options are {', '.join(default_tab_options)}. Custom folders are also supported by specifying their path."
-    image_browser_options.append(("image_browser_active_tabs", ", ".join(default_tab_options), active_tabs_description, None))
-    image_browser_options.append(("image_browser_with_subdirs", True, "Include images in sub directories", "images_history_with_subdirs"))
-    image_browser_options.append(("image_browser_preload", False, "Preload images at startup", "images_history_preload"))
-    image_browser_options.append(("image_browser_copy_image", False, "Move buttons copy instead of move", "images_copy_image"))
-    image_browser_options.append(("image_browser_delete_message", True, "Print image deletion messages to the console", "images_delete_message"))
-    image_browser_options.append(("image_browser_txt_files", True, "Move/Copy/Delete matching .txt files", "images_txt_files"))
-    image_browser_options.append(("image_browser_logger_warning", False, "Print warning logs to the console", "images_logger_warning"))
-    image_browser_options.append(("image_browser_logger_debug", False, "Print debug logs to the console", "images_logger_debug"))
-    image_browser_options.append(("image_browser_delete_recycle", False, "Use recycle bin when deleting images", "images_delete_recycle"))
-    image_browser_options.append(("image_browser_scan_exif", True, "Scan Exif-/.txt-data (slower, but required for exif-keyword-search)", "images_scan_exif"))
-    image_browser_options.append(("image_browser_mod_shift", False, "Change CTRL keybindings to SHIFT", None))
-    image_browser_options.append(("image_browser_mod_ctrl_shift", False, "or to CTRL+SHIFT", None))
-    image_browser_options.append(("image_browser_enable_maint", True, "Enable Maintenance tab", None))
-    image_browser_options.append(("image_browser_ranking_pnginfo", False, "Save ranking in image's pnginfo", None))
 
-    image_browser_options.append(("image_browser_page_columns", 6, "Number of columns on the page", "images_history_page_columns"))
-    image_browser_options.append(("image_browser_page_rows", 6, "Number of rows on the page", "images_history_page_rows"))
-    image_browser_options.append(("image_browser_pages_perload", 20, "Minimum number of pages per load", "images_history_pages_perload"))
-    image_browser_options.append(("image_browser_height_auto", True, "Use automatic height for gallery", None))
+    image_browser_options = [
+        ("image_browser_active_tabs", None, ", ".join(default_tab_options), active_tabs_description),
+        ("image_browser_hidden_components", None, [], "Select components to hide", DropdownMulti, lambda: {"choices": components_list}),
+        ("image_browser_with_subdirs", "images_history_with_subdirs", True, "Include images in sub directories"),
+        ("image_browser_preload", "images_history_preload", False, "Preload images at startup"),
+        ("image_browser_copy_image", "images_copy_image", False, "Move buttons copy instead of move"),
+        ("image_browser_delete_message", "images_delete_message", True, "Print image deletion messages to the console"),
+        ("image_browser_txt_files", "images_txt_files", True, "Move/Copy/Delete matching .txt files"),
+        ("image_browser_logger_warning", "images_logger_warning", False, "Print warning logs to the console"),
+        ("image_browser_logger_debug", "images_logger_debug", False, "Print debug logs to the console"),
+        ("image_browser_delete_recycle", "images_delete_recycle", False, "Use recycle bin when deleting images"),
+        ("image_browser_scan_exif", "images_scan_exif", True, "Scan Exif-/.txt-data (initially slower, but required for many features to work)"),
+        ("image_browser_mod_shift", None, False, "Change CTRL keybindings to SHIFT"),
+        ("image_browser_mod_ctrl_shift", None, False, "or to CTRL+SHIFT"),
+        ("image_browser_enable_maint", None, True, "Enable Maintenance tab"),
+        ("image_browser_ranking_pnginfo", None, False, "Save ranking in image's pnginfo"),
+        ("image_browser_page_columns", "images_history_page_columns", 6, "Number of columns on the page"),
+        ("image_browser_page_rows", "images_history_page_rows", 6, "Number of rows on the page"),
+        ("image_browser_pages_perload", "images_history_pages_perload", 20, "Minimum number of pages per load"),
+        ("image_browser_height_auto", None, True, "Use automatic height for gallery"),
+    ]
 
     section = ('image-browser', "Image Browser")
     # Move historic setting names to current names
     added = 0
-    for i in range(len(image_browser_options)):
-        if image_browser_options[i][3] is not None:
-            added = move_setting(image_browser_options[i], section, added)
+    for cur_setting_name, old_setting_name, *option_info in image_browser_options:
+        if old_setting_name is not None:
+            added = move_setting(cur_setting_name, old_setting_name, option_info, section, added)
     if added > 0:
         shared.opts.save(shared.config_filename)
 
-    for i in range(len(image_browser_options)):
-        shared.opts.add_option(image_browser_options[i][0], shared.OptionInfo(image_browser_options[i][1], image_browser_options[i][2], section=section))
+    for cur_setting_name, _, *option_info in image_browser_options:
+        shared.opts.add_option(cur_setting_name, shared.OptionInfo(*option_info, section=section))
 
 script_callbacks.on_ui_settings(on_ui_settings)
 script_callbacks.on_ui_tabs(on_ui_tabs)

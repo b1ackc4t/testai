@@ -62,28 +62,29 @@ function image_browser_get_current_img(tab_base_tag, img_index, page_index, file
 }
 
 function image_browser_delete(del_num, tab_base_tag, image_index) {
-    image_index = parseInt(image_index);
-    const tab = gradioApp().getElementById(tab_base_tag + '_image_browser');
-    const set_btn = tab.querySelector(".image_browser_set_index");
-    const gallery_items = Array.from(tab.querySelectorAll('.gallery-item')).filter(item => item.style.display !== 'none');
-    const img_num = gallery_items.length / 2;
-    del_num = Math.min(img_num - image_index, del_num)
-    if (img_num <= del_num) {
-        // If all images are deleted, we reload the browser page.
-        setTimeout(function(tab_base_tag) {
-            gradioApp().getElementById(tab_base_tag + '_image_browser_renew_page').click();
-        }, 30, tab_base_tag);
-    } else {
-        // After deletion of the image, we have to navigate to the next image (or wraparound).
-        for (let i = 0; i < del_num; i++) {
-            gallery_items[image_index + i].style.display = 'none';
-            gallery_items[image_index + i + img_num].style.display = 'none';
+    setTimeout(function() {
+        image_index = parseInt(image_index);
+        const tab = gradioApp().getElementById(tab_base_tag + '_image_browser');
+        const set_btn = tab.querySelector(".image_browser_set_index");
+        const gallery_items = Array.from(tab.querySelectorAll('.gallery-item')).filter(item => item.style.display !== 'none');
+        const img_num = gallery_items.length / 2;
+        del_num = Math.min(img_num - image_index, del_num)
+        if (img_num <= del_num) {
+            // If all images are deleted, we reload the browser page.
+            setTimeout(function(tab_base_tag) {
+                gradioApp().getElementById(tab_base_tag + '_image_browser_renew_page').click();
+            }, 30, tab_base_tag);
+        } else {
+            // After deletion of the image, we have to navigate to the next image (or wraparound).
+            for (let i = 0; i < del_num; i++) {
+                gallery_items[image_index + i].style.display = 'none';
+                gallery_items[image_index + i + img_num].style.display = 'none';
+            }
+            const next_img = gallery_items.find((elem, i) => elem.style.display !== 'none' && i > image_index);
+            const btn = next_img || gallery_items[image_index - 1];
+            setTimeout(function(btn){btn.click()}, 30, btn);
         }
-        const next_img = gallery_items.find((elem, i) => elem.style.display !== 'none' && i > image_index);
-        const btn = next_img || gallery_items[image_index - 1];
-        setTimeout(function(btn){btn.click()}, 30, btn);
-    }
-
+    }, 1000);
 }
 
 function image_browser_turnpage(tab_base_tag) {
@@ -93,7 +94,17 @@ function image_browser_turnpage(tab_base_tag) {
     });
 }
 
-async function image_browser_openoutpaint_get_image(tab_base_tag, image_index) {
+function image_browser_gototab(tabname, tabsId = "tabs") {
+	Array.from(
+		gradioApp().querySelectorAll(`#${tabsId} > div:first-child button`)
+	).forEach((button) => {
+		if (button.textContent.trim() === tabname) {
+			button.click();
+		}
+	});
+}
+
+async function image_browser_get_image_for_ext(tab_base_tag, image_index) {
     var image_browser_image = gradioApp().querySelectorAll(`#${tab_base_tag}_image_browser_gallery .gallery-item`)[image_index];
 
 	const canvas = document.createElement("canvas");
@@ -111,7 +122,7 @@ async function image_browser_openoutpaint_get_image(tab_base_tag, image_index) {
 }
 
 function image_browser_openoutpaint_send(tab_base_tag, image_index, image_browser_prompt, image_browser_neg_prompt, name = "WebUI Resource") {
-    image_browser_openoutpaint_get_image(tab_base_tag, image_index)
+    image_browser_get_image_for_ext(tab_base_tag, image_index)
 		.then((dataURL) => {
 			// Send to openOutpaint
 			openoutpaint_send_image(dataURL, name);
@@ -129,8 +140,45 @@ function image_browser_openoutpaint_send(tab_base_tag, image_index, image_browse
             });
 
 			// Change Tab
-			openoutpaint_gototab();
+            image_browser_gototab("openOutpaint");
 		})
+}
+
+async function image_browser_controlnet_send(toTab,tab_base_tag, image_index, controlnetNum) {
+    const dataURL = await image_browser_get_image_for_ext(tab_base_tag, image_index);
+    const blob = await (await fetch(dataURL)).blob();
+    const dt = new DataTransfer();
+    dt.items.add(new File([blob], "ImageBrowser.png", { type: blob.type }));
+    const container = gradioApp().querySelector(
+        toTab === "txt2img" ? "#txt2img_script_container" : "#img2img_script_container"
+    );
+    const accordion = container.querySelector("#controlnet .transition");
+    if (accordion.classList.contains("rotate-90")) accordion.click();
+
+    const tab = container.querySelectorAll(
+        "#controlnet > div:nth-child(2) > .tabs > .tabitem, #controlnet > div:nth-child(2) > div:not(.tabs)"
+    )[controlnetNum];
+    if (tab.classList.contains("tabitem"))
+        tab.parentElement.firstElementChild.querySelector(`:nth-child(${Number(controlnetNum) + 1})`).click();
+
+    const input = tab.querySelector("input[type='file']");
+    try {
+        input.previousElementSibling.previousElementSibling.querySelector("button[aria-label='Clear']").click();
+    } catch (e) {}
+
+    input.value = "";
+    input.files = dt.files;
+    input.dispatchEvent(new Event("change", { bubbles: true, composed: true }));
+
+    image_browser_gototab(toTab);
+};
+
+function image_browser_controlnet_send_txt2img(tab_base_tag, image_index, controlnetNum) {
+    image_browser_controlnet_send("txt2img", tab_base_tag, image_index, controlnetNum);
+}
+  
+function image_browser_controlnet_send_img2img(tab_base_tag, image_index, controlnetNum) {
+    image_browser_controlnet_send("img2img", tab_base_tag, image_index, controlnetNum);
 }
 
 function image_browser_init() {
@@ -269,7 +317,12 @@ gradioApp().addEventListener("keydown", function(event) {
         }
     }
 
-    if (event.code == "KeyF") {
+    let modifiers_none = false;
+    if (!event.ctrlKey && !event.shiftKey && !event.altKey && !event.metaKey) {
+        modifiers_none = true;
+    }
+
+    if (event.code == "KeyF" && modifiers_none) {
         if (tab_base_tag == "Favorites") {
             return;
         }
@@ -277,18 +330,18 @@ gradioApp().addEventListener("keydown", function(event) {
         favoriteBtn.dispatchEvent(new Event("click"));
     }
 
-    if (event.code == "KeyR") {
+    if (event.code == "KeyR" && modifiers_none) {
         const refreshBtn = gradioApp().getElementById(tab_base_tag + "_image_browser_renew_page");
         refreshBtn.dispatchEvent(new Event("click"));
     }
 
-    if (event.code == "Delete") {
+    if (event.code == "Delete" && modifiers_none) {
         const deleteBtn = gradioApp().getElementById(tab_base_tag + "_image_browser_del_img_btn");
         deleteBtn.dispatchEvent(new Event("click"));
     }
 
     // prevent left arrow following delete, instead refresh page
-    if (event.code == "ArrowLeft" && !event.altKey && !event.ctrlKey && !event.shiftKey && !event.metaKey) {
+    if (event.code == "ArrowLeft" && modifiers_none) {
         const deleteState = gradioApp().getElementById(tab_base_tag + "_image_browser_delete_state").getElementsByClassName('gr-check-radio gr-checkbox')[0];
         if (deleteState.checked) {
             const refreshBtn = gradioApp().getElementById(tab_base_tag + "_image_browser_renew_page");

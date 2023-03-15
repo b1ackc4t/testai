@@ -1,9 +1,11 @@
+import hashlib
 import json
 import os
 import sqlite3
 from modules import scripts
+from PIL import Image
 
-version = 3
+version = 6
 
 path_recorder_file = os.path.join(scripts.basedir(), "path_recorder.txt")
 aes_cache_file = os.path.join(scripts.basedir(), "aes_scores.json")
@@ -14,6 +16,35 @@ db_file = os.path.join(scripts.basedir(), "wib.sqlite3")
 np = "Negative prompt: "
 st = "Steps: "
 timeout = 30
+
+def create_filehash(cursor):
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS filehash (
+            file TEXT PRIMARY KEY,
+            hash TEXT,
+            created TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        )
+    ''')
+
+    cursor.execute('''
+        CREATE TRIGGER filehash_tr 
+        AFTER UPDATE ON filehash
+        BEGIN
+            UPDATE filehash SET updated = CURRENT_TIMESTAMP WHERE file = OLD.file;
+        END;
+    ''')
+
+    return
+
+def create_work_files(cursor):
+    cursor.execute('''
+        CREATE TABLE IF NOT EXISTS work_files (
+            file TEXT PRIMARY KEY
+        )
+    ''')
+
+    return
 
 def create_db(cursor):
     cursor.execute('''
@@ -85,6 +116,9 @@ def create_db(cursor):
             UPDATE ranking SET updated = CURRENT_TIMESTAMP WHERE file = OLD.file;
         END;
     ''')
+
+    create_filehash(cursor)
+    create_work_files(cursor)
 
     return
 
@@ -209,6 +243,41 @@ def migrate_ranking(cursor):
                 INSERT INTO ranking (file, name, ranking)
                 VALUES (?, ?, ?)
                 ''', (file, name, info))
+
+    return
+
+def get_hash(file):
+    # Get filehash without exif info
+    try:
+        image = Image.open(file)
+    except Exception as e:
+        print(e)
+
+    hash = hashlib.sha512(image.tobytes()).hexdigest()
+    image.close()
+    
+    return hash
+
+def migrate_filehash(cursor, version):
+    if version <= "4":
+        create_filehash(cursor)
+    
+    cursor.execute('''
+    SELECT file
+    FROM ranking
+    ''')
+    for (file,) in cursor.fetchall():
+        if os.path.exists(file):
+            hash = get_hash(file)
+            cursor.execute('''
+            INSERT INTO filehash (file, hash)
+            VALUES (?, ?)
+            ''', (file, hash))
+
+    return
+
+def migrate_work_files(cursor):
+    create_work_files(cursor)
 
     return
 
@@ -342,28 +411,33 @@ def migrate_ranking_dirs(cursor, db_version):
 
 def check():
     if not os.path.exists(db_file):
-        print("Image Browser: Creating database")
         conn, cursor = transaction_begin()
+        print("Image Browser: Creating database")
         create_db(cursor)
         update_db_data(cursor, "version", version)
         migrate_path_recorder(cursor)
         migrate_exif_data(cursor)
         migrate_ranking(cursor)
+        migrate_filehash(cursor, str(version))
         transaction_end(conn, cursor)
         print("Image Browser: Database created")
     db_version = get_version()
+    conn, cursor = transaction_begin()
     if db_version[0] <= "2":
         # version 1 database had mixed path notations, changed them all to abspath
         # version 2 database still had mixed path notations, because of windows short name, changed them all to realpath
         print(f"Image Browser: Upgrading database from version {db_version[0]} to version {version}")
-        conn, cursor = transaction_begin()
-        update_db_data(cursor, "version", version)
         migrate_path_recorder_dirs(cursor)
         migrate_exif_data_dirs(cursor)
         migrate_ranking_dirs(cursor, db_version[0])
-        transaction_end(conn, cursor)
+    if db_version[0] <= "4":
+        migrate_filehash(cursor, db_version[0])
+    if db_version[0] <= "5":
+        migrate_work_files(cursor)
+        update_db_data(cursor, "version", version)
         print(f"Image Browser: Database upgraded from version {db_version[0]} to version {version}")
-
+    transaction_end(conn, cursor)
+        
     return version
 
 def load_path_recorder():
@@ -377,37 +451,20 @@ def load_path_recorder():
 
     return path_recorder
 
-def select_ranking(filename):
-    conn, cursor = transaction_begin()
-    cursor.execute('''
-    SELECT ranking
-    FROM ranking
-    WHERE file = ?
-    ''', (filename,))
-    ranking_value = cursor.fetchone()
-    
-    # if ranking not found search again, without path (moved?)
-    if ranking_value is None:
-        name = os.path.basename(filename)
+def select_ranking(file):
+    with sqlite3.connect(db_file, timeout=timeout) as conn:
+        cursor = conn.cursor()
         cursor.execute('''
         SELECT ranking
         FROM ranking
-        WHERE name = ?
-        ''', (name,))
+        WHERE file = ?
+        ''', (file,))
         ranking_value = cursor.fetchone()
-        # and insert with current filepath
-        if ranking_value is not None:
-            (insert_ranking,) = ranking_value
-            cursor.execute('''
-            INSERT INTO ranking (file, name, ranking)
-            VALUES (?, ?, ?)
-            ''', (filename, name, insert_ranking))
-    
+
     if ranking_value is None:
         return_ranking = "None"
     else:
         (return_ranking,) = ranking_value
-    transaction_end(conn, cursor)
     
     return return_ranking
 
@@ -416,16 +473,23 @@ def update_ranking(file, ranking):
     with sqlite3.connect(db_file, timeout=timeout) as conn:
         cursor = conn.cursor()
         if ranking == "None":
-                cursor.execute('''
-                DELETE FROM ranking
-                WHERE name = ?
-                ''', (name,))
+            cursor.execute('''
+            DELETE FROM ranking
+            WHERE file = ? 
+            ''', (file,))
         else:
-                cursor.execute('''
-                INSERT OR REPLACE
-                INTO ranking (file, name, ranking)
-                VALUES (?, ?, ?)
-                ''', (file, name, ranking))
+            cursor.execute('''
+            INSERT OR REPLACE
+            INTO ranking (file, name, ranking)
+            VALUES (?, ?, ?)
+            ''', (file, name, ranking))
+            
+            hash = get_hash(file)
+            cursor.execute('''
+            INSERT OR REPLACE
+            INTO filehash (file, hash)
+            VALUES (?, ?)
+            ''', (file, hash))
     
     return
 
@@ -479,6 +543,81 @@ def update_ranking_mult(cursor, update_from, update_to):
     SET file = ? || SUBSTR(file, LENGTH(?) + 1)
     WHERE file like ? || '%'
     ''', (update_to, update_from, update_from))
+
+    return
+
+def delete_exif_0(cursor):
+    cursor.execute('''
+    DELETE FROM exif_data
+    WHERE file IN (
+        SELECT file FROM exif_data a
+        WHERE value = '0'
+        GROUP BY file
+        HAVING COUNT(*) = (SELECT COUNT(*) FROM exif_data WHERE file = a.file)
+    )
+    ''')
+
+    return
+
+def get_ranking_by_file(cursor, file):
+    cursor.execute('''
+    SELECT ranking
+    FROM ranking
+    WHERE file = ?
+    ''', (file,))
+    ranking_value = cursor.fetchone()
+
+    return ranking_value
+
+def get_ranking_by_name(cursor, name):
+    cursor.execute('''
+    SELECT file, ranking
+    FROM ranking
+    WHERE name = ?
+    ''', (name,))
+    ranking_value = cursor.fetchone()
+
+    if ranking_value is not None:
+        (file, _) = ranking_value
+        cursor.execute('''
+        SELECT hash
+        FROM filehash
+        WHERE file = ? 
+        ''', (file,))
+        hash_value = cursor.fetchone()
+    else:
+        hash_value = None
+
+    return ranking_value, hash_value
+
+def insert_ranking(cursor, file, ranking, hash):
+    name = os.path.basename(file)
+    cursor.execute('''
+    INSERT INTO ranking (file, name, ranking)
+    VALUES (?, ?, ?)
+    ''', (file, name, ranking))
+    
+    cursor.execute('''
+    INSERT OR REPLACE
+    INTO filehash (file, hash)
+    VALUES (?, ?)
+    ''', (file, hash))
+
+    return
+
+def replace_ranking(cursor, file, alternate_file, hash):
+    name = os.path.basename(file)
+    cursor.execute('''
+    UPDATE ranking
+    SET file = ?
+    WHERE file = ?
+    ''', (file, alternate_file))
+
+    cursor.execute('''
+    INSERT OR REPLACE
+    INTO filehash (file, hash)
+    VALUES (?, ?)
+    ''', (file, hash))
 
     return
 
@@ -584,3 +723,86 @@ def get_exif_dirs():
         dirs[dir] = dir
 
     return dirs
+
+def fill_work_files(cursor, fileinfos):
+    filenames = [x[0] for x in fileinfos]
+    
+    cursor.execute('''
+    DELETE
+    FROM work_files
+    ''')
+
+    sql = '''
+    INSERT INTO work_files (file)
+    VALUES (?)
+    '''
+
+    cursor.executemany(sql, [(x,) for x in filenames])
+
+    return
+
+def filter_aes(cursor, fileinfos, aes_filter_min_num, aes_filter_max_num):
+    cursor.execute('''
+    DELETE
+    FROM work_files
+    WHERE file not in (
+        SELECT file
+        FROM exif_data b
+        WHERE file = b.file
+          AND b.key = 'aesthetic_score'
+          AND CAST(b.value AS REAL) between ? and ?
+    )
+    ''', (aes_filter_min_num, aes_filter_max_num))
+
+    cursor.execute('''
+    SELECT file
+    FROM work_files
+    ''')
+
+    rows = cursor.fetchall()
+
+    fileinfos_dict = {pair[0]: pair[1] for pair in fileinfos}
+    fileinfos_new = []
+    for (file,) in rows:
+        if fileinfos_dict.get(file) is not None:
+            fileinfos_new.append((file, fileinfos_dict[file]))
+
+    return fileinfos_new
+
+def filter_ranking(cursor, fileinfos, ranking_filter):
+    if ranking_filter == "None":
+        cursor.execute('''
+        DELETE
+        FROM work_files
+        WHERE file IN (
+            SELECT file
+            FROM ranking b
+            WHERE file = b.file
+        )
+        ''')
+    else:
+        cursor.execute('''
+        DELETE
+        FROM work_files
+        WHERE file NOT IN (
+            SELECT file
+            FROM ranking b
+            WHERE file = b.file
+            AND b.ranking = ?
+        )
+        ''', (ranking_filter,))
+
+    cursor.execute('''
+    SELECT file
+    FROM work_files
+    ''')
+
+    rows = cursor.fetchall()
+    
+    fileinfos_dict = {pair[0]: pair[1] for pair in fileinfos}
+    fileinfos_new = []
+    for (file,) in rows:
+        if fileinfos_dict.get(file) is not None:
+            fileinfos_new.append((file, fileinfos_dict[file]))
+    
+    return fileinfos_new
