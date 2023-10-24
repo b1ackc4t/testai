@@ -25,7 +25,7 @@ from modules import paths, shared, script_callbacks, scripts, images
 from modules.shared import opts, cmd_opts
 from modules.ui_common import plaintext_to_html
 from modules.ui_components import ToolButton, DropdownMulti
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 from packaging import version
 from pathlib import Path
 from typing import List, Tuple
@@ -888,7 +888,7 @@ def get_image_thumbnail(image_list):
             top = (height - min(width, height)) / 2
             right = (width + min(width, height)) / 2
             bottom = (height + min(width, height)) / 2
-            thumbnail = image.crop((left, top, right, bottom))
+            thumbnail = image.crop((left, top, right, bottom)) if opts.image_browser_thumbnail_crop else ImageOps.pad(image, (max(width, height),max(width, height)), color="#000")
             thumbnail.thumbnail((opts.image_browser_thumbnail_size, opts.image_browser_thumbnail_size))
             if thumbnail.mode != "RGB":
                 thumbnail = thumbnail.convert("RGB")
@@ -1723,6 +1723,7 @@ def on_ui_settings():
         ("image_browser_height_auto", None, False, "Use automatic height for gallery (requires Gradio >= 3.36.0)"),
         ("image_browser_use_thumbnail", None, False, "Use optimized images in the thumbnail interface (significantly reduces the amount of data transferred)"),
         ("image_browser_thumbnail_size", None, 200, "Size of the thumbnails (px)"),
+        ("image_browser_thumbnail_crop", None, False, "Crop thumbnail to square"),
         ("image_browser_swipe", None, False, "Swipe left/right navigates to the next image"),
         ("image_browser_img_tooltips", None, True, "Enable thumbnail tooltips"),
         ("image_browser_show_progress", None, True, "Show progress indicator"),
