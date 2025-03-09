@@ -3,6 +3,7 @@ import json
 import os
 import sqlite3
 import re
+import time
 from shutil import copy2
 from modules import scripts, shared
 from tempfile import gettempdir
@@ -33,7 +34,9 @@ def backup_tmp_db():
 
 np = "Negative prompt: "
 st = "Steps: "
-timeout = 30
+timeout = 60 # Timeout for locked database in seconds
+max_retries = 5  # Number of retries for locked database
+retry_delay = 1  # Initial delay between retries in seconds
 
 @contextmanager
 def transaction(db = db_file):
@@ -47,6 +50,29 @@ def transaction(db = db_file):
     finally:
         conn.close()
         backup_tmp_db()
+
+def execute_with_retry(func, *args, **kwargs):
+    """Execute a database function with retry mechanism for locked database"""
+    current_retry = 0
+    last_error = None
+    
+    while current_retry < max_retries:
+        try:
+            return func(*args, **kwargs)
+        except sqlite3.OperationalError as e:
+            if "database is locked" in str(e):
+                current_retry += 1
+                last_error = e
+                # Exponential backoff
+                sleep_time = retry_delay * (2 ** (current_retry - 1))
+                print(f"Database locked, retrying in {sleep_time:.2f} seconds... (Attempt {current_retry}/{max_retries})")
+                time.sleep(sleep_time)
+            else:
+                # If different error, re-raise it
+                raise
+    
+    # If exhausted retries, raise last error
+    raise last_error
 
 def create_filehash(cursor):
     cursor.execute('''
@@ -813,19 +839,22 @@ def get_exif_dirs():
 
 def fill_work_files(cursor, fileinfos):
     filenames = [x[0] for x in fileinfos]
-
-    cursor.execute('''
-    DELETE
-    FROM work_files
-    ''')
-
-    sql = '''
-    INSERT INTO work_files (file)
-    VALUES (?)
-    '''
-
-    cursor.executemany(sql, [(x,) for x in filenames])
-
+    
+    def _execute_fill():
+        with transaction() as retry_cursor:
+            retry_cursor.execute('''
+            DELETE
+            FROM work_files
+            ''')
+            
+            retry_cursor.executemany('''
+            INSERT INTO work_files (file)
+            VALUES (?)
+            ''', [(x,) for x in filenames])
+    
+    # Use the retry mechanism
+    execute_with_retry(_execute_fill)
+    
     return
 
 def filter_aes(cursor, fileinfos, aes_filter_min_num, aes_filter_max_num):
