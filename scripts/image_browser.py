@@ -807,71 +807,18 @@ def get_all_images(dir_name, sort_by, sort_order, keyword, tab_base_tag_box, img
         filenames = [finfo[0] for finfo in fileinfos]
     
     if opts.image_browser_scan_exif:
-        with wib_db.transaction() as cursor:
-            if len(exif_keyword) != 0:
-                if use_regex:
-                    regex_error = False
-                    try:
-                        test_re = re.compile(exif_keyword, re.DOTALL)
-                    except re.error as e:
-                        regex_error = True
-                        print(f"Regex error: {e}")
-                if (use_regex and not regex_error) or not use_regex:
-                    if negative_prompt_search == "Yes":
-                        fileinfos = [x for x in fileinfos if exif_search(exif_keyword, exif_cache[x[0]], use_regex)]
-                    else:
-                        result = []
-                        for file_info in fileinfos:
-                            file_name = file_info[0]
-                            file_exif = exif_cache[file_name]
-                            file_exif_lc = file_exif.lower()
-                            start_index = file_exif_lc.find(np)
-                            end_index = file_exif.find("\n", start_index)
-                            if negative_prompt_search == "Only":
-                                start_index = start_index + len(np)
-                                sub_string = file_exif[start_index:end_index].strip()
-                                if exif_search(exif_keyword, sub_string, use_regex):
-                                    result.append(file_info)
-                            else:
-                                sub_string = file_exif[start_index:end_index].strip()
-                                file_exif = file_exif.replace(sub_string, "")
-                                
-                                if exif_search(exif_keyword, file_exif, use_regex):
-                                    result.append(file_info)
-                        fileinfos = result
-                    filenames = [finfo[0] for finfo in fileinfos]
-            wib_db.fill_work_files(cursor, fileinfos)
-            if len(aes_filter_min) != 0 or len(aes_filter_max) != 0:
-                try:
-                    aes_filter_min_num = float(aes_filter_min)
-                except ValueError:
-                    aes_filter_min_num = sys.float_info.min
-                try:
-                    aes_filter_max_num = float(aes_filter_max)
-                except ValueError:
-                    aes_filter_max_num = sys.float_info.max
-
-                fileinfos = wib_db.filter_aes(cursor, fileinfos, aes_filter_min_num, aes_filter_max_num)
-                filenames = [finfo[0] for finfo in fileinfos]   
-            if ranking_filter != "All":
-                ranking_filter_min_num = 1
-                ranking_filter_max_num = 5
-                if ranking_filter == "Min-max":
-                    try:
-                        ranking_filter_min_num = int(ranking_filter_min)
-                    except ValueError:
-                        ranking_filter_min_num = 0
-                    try:
-                        ranking_filter_max_num = int(ranking_filter_max)
-                    except ValueError:
-                        ranking_filter_max_num = 0
-                    if ranking_filter_min_num < 1:
-                        ranking_filter_min_num = 1
-                    if ranking_filter_max_num < 1 or ranking_filter_max_num > 5:
-                        ranking_filter_max_num = 5
-
-                fileinfos = wib_db.filter_ranking(cursor, fileinfos, ranking_filter, ranking_filter_min_num, ranking_filter_max_num)
-                filenames = [finfo[0] for finfo in fileinfos]
+        try:
+            # Use the retry mechanism for database operations and capture returned fileinfos
+            fileinfos = wib_db.execute_with_retry(lambda: _process_exif_data(fileinfos, exif_keyword, negative_prompt_search, use_regex, 
+                                                              ranking_filter, ranking_filter_min, ranking_filter_max, 
+                                                              aes_filter_min, aes_filter_max))
+            filenames = [finfo[0] for finfo in fileinfos]
+        except Exception as e:
+            logger.error(f"Database error in get_all_images: {str(e)}")
+            # Return what we have in case of error
+            filenames = [finfo[0] for finfo in fileinfos]
+    else:
+        filenames = [finfo[0] for finfo in fileinfos]
     
     if sort_by == "date":
         if sort_order == up_symbol:
@@ -930,6 +877,78 @@ def get_all_images(dir_name, sort_by, sort_order, keyword, tab_base_tag_box, img
         else:
             filenames = [finfo for finfo in fileinfos]
     return filenames
+
+def _process_exif_data(fileinfos, exif_keyword, negative_prompt_search, use_regex, ranking_filter, ranking_filter_min, ranking_filter_max, aes_filter_min, aes_filter_max):
+    """Helper function to process EXIF data with transaction handling"""
+    with wib_db.transaction() as cursor:
+        if len(exif_keyword) != 0:
+            if use_regex:
+                regex_error = False
+                try:
+                    test_re = re.compile(exif_keyword, re.DOTALL)
+                except re.error as e:
+                    regex_error = True
+                    print(f"Regex error: {e}")
+            if (use_regex and not regex_error) or not use_regex:
+                if negative_prompt_search == "Yes":
+                    fileinfos = [x for x in fileinfos if exif_search(exif_keyword, exif_cache[x[0]], use_regex)]
+                else:
+                    result = []
+                    for file_info in fileinfos:
+                        file_name = file_info[0]
+                        file_exif = exif_cache[file_name]
+                        file_exif_lc = file_exif.lower()
+                        start_index = file_exif_lc.find(np)
+                        end_index = file_exif.find("\n", start_index)
+                        if negative_prompt_search == "Only":
+                            start_index = start_index + len(np)
+                            sub_string = file_exif[start_index:end_index].strip()
+                            if exif_search(exif_keyword, sub_string, use_regex):
+                                result.append(file_info)
+                        else:
+                            sub_string = file_exif[start_index:end_index].strip()
+                            file_exif = file_exif.replace(sub_string, "")
+                            
+                            if exif_search(exif_keyword, file_exif, use_regex):
+                                result.append(file_info)
+                    fileinfos = result
+
+        # Fill work files for further filtering
+        wib_db.fill_work_files(cursor, fileinfos)
+        
+        if len(aes_filter_min) != 0 or len(aes_filter_max) != 0:
+            try:
+                aes_filter_min_num = float(aes_filter_min)
+            except ValueError:
+                aes_filter_min_num = sys.float_info.min
+            try:
+                aes_filter_max_num = float(aes_filter_max)
+            except ValueError:
+                aes_filter_max_num = sys.float_info.max
+
+            fileinfos = wib_db.filter_aes(cursor, fileinfos, aes_filter_min_num, aes_filter_max_num)
+            
+        if ranking_filter != "All":
+            ranking_filter_min_num = 1
+            ranking_filter_max_num = 5
+            if ranking_filter == "Min-max":
+                try:
+                    ranking_filter_min_num = int(ranking_filter_min)
+                except ValueError:
+                    ranking_filter_min_num = 0
+                try:
+                    ranking_filter_max_num = int(ranking_filter_max)
+                except ValueError:
+                    ranking_filter_max_num = 0
+                if ranking_filter_min_num < 1:
+                    ranking_filter_min_num = 1
+                if ranking_filter_max_num < 1 or ranking_filter_max_num > 5:
+                    ranking_filter_max_num = 5
+
+            fileinfos = wib_db.filter_ranking(cursor, fileinfos, ranking_filter, ranking_filter_min_num, ranking_filter_max_num)
+    
+    # Return the modified fileinfos list
+    return fileinfos
 
 def hash_image_path(image_path):
     image_path_hash = hashlib.md5(image_path.encode("utf-8")).hexdigest()
