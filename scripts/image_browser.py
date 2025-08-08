@@ -1,10 +1,25 @@
-import gradio as gr
+from PIL import Image, ImageOps, UnidentifiedImageError, ImageDraw
+from datetime import datetime
+from io import StringIO
+from itertools import chain
+from modules import paths, shared, script_callbacks, scripts, images
+from modules.shared import opts, cmd_opts
+from modules.ui_common import plaintext_to_html, save_files
+from modules.ui_components import ToolButton, DropdownMulti
+from packaging import version
+from pathlib import Path
+from typing import List, Tuple
 import codecs
 import csv
+import gradio as gr
+import hashlib
 import importlib
 import json
 import logging
 import math
+import modules.extras
+import modules.images
+import modules.ui
 import os
 import platform
 import random
@@ -17,21 +32,6 @@ import tempfile
 import time
 import torch
 import traceback
-import hashlib
-import modules.extras
-import modules.images
-import modules.ui
-from datetime import datetime
-from modules import paths, shared, script_callbacks, scripts, images
-from modules.shared import opts, cmd_opts
-from modules.ui_common import plaintext_to_html
-from modules.ui_components import ToolButton, DropdownMulti
-from PIL import Image, ImageOps, UnidentifiedImageError, ImageDraw
-from packaging import version
-from pathlib import Path
-from typing import List, Tuple
-from itertools import chain
-from io import StringIO
 
 try:
     from scripts.wib import wib_db
@@ -80,12 +80,12 @@ if not opencv_installed:
 exif_cache = {}
 aes_cache = {}
 none_select = "Nothing selected"
-refresh_symbol = '\U0001f504'  # 🔄
-up_symbol = '\U000025b2'  # ▲
-down_symbol = '\U000025bc'  # ▼
-caution_symbol = '\U000026a0'  # ⚠
-folder_symbol = '\U0001f4c2'  # 📂
-play_symbol = '\U000023f5'  # ⏵
+refresh_symbol = "\U0001f504"  # 🔄
+up_symbol = "\U000025b2"  # ▲
+down_symbol = "\U000025bc"  # ▼
+caution_symbol = "\U000026a0"  # ⚠
+folder_symbol = "\U0001f4c2"  # 📂
+play_symbol = "\U000023f5"  # ⏵
 current_depth = 0
 init = True
 copy_move = ["Move", "Copy"]
@@ -143,16 +143,16 @@ class ImageBrowserTab():
 
     def remove_invalid_html_tag_chars(self, tag: str) -> str:
         # Removes any character that is not a letter, a digit, a hyphen, or an underscore
-        removed = re.sub(r'[^a-zA-Z0-9\-_]', '', tag)
+        removed = re.sub(r"[^a-zA-Z0-9\-_]", "", tag)
         return removed
 
     def get_unique_base_tag(self, base_tag: str) -> str:
         counter = 1
         while base_tag in self.seen_base_tags:
-            match = re.search(r'_(\d+)$', base_tag)
+            match = re.search(r"_(\d+)$", base_tag)
             if match:
                 counter = int(match.group(1)) + 1
-                base_tag = re.sub(r'_(\d+)$', f"_{counter}", base_tag)
+                base_tag = re.sub(r"_(\d+)$", f"_{counter}", base_tag)
             else:
                 base_tag = f"{base_tag}_{counter}"
             counter += 1
@@ -208,7 +208,7 @@ def setup_file_handler():
     if not handler_active:
         file_handler = logging.FileHandler(log_file)
         file_handler.setLevel(logger_mode)
-        formatter = logging.Formatter(f'%(asctime)s image_browser.py: %(message)s', datefmt='%Y-%m-%d-%H:%M:%S')
+        formatter = logging.Formatter(f"%(asctime)s image_browser.py: %(message)s", datefmt="%Y-%m-%d-%H:%M:%S")
         file_handler.setFormatter(formatter)
         logger.addHandler(file_handler)
 
@@ -237,7 +237,7 @@ def setup_debug():
     if not common_logger:
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logger_mode)
-        formatter = logging.Formatter(f'%(asctime)s image_browser.py: %(message)s', datefmt='%Y-%m-%d-%H:%M:%S')
+        formatter = logging.Formatter(f"%(asctime)s image_browser.py: %(message)s", datefmt="%Y-%m-%d-%H:%M:%S")
         console_handler.setFormatter(formatter)
         logger.addHandler(console_handler)
     if level_value >= capture_level_value:
@@ -252,7 +252,7 @@ def setup_debug():
         logger.debug(f"{sys.executable} {sys.version}")
         logger.debug(f"{platform.system()} {platform.version()}")
         try:
-            git = os.environ.get('GIT', "git")
+            git = os.environ.get("GIT", "git")
             webui_commit_hash = os.popen(f"{git} rev-parse HEAD").read().strip()
             sm_hashes = os.popen(f"{git} submodule").read()
             sm_hashes_lines = sm_hashes.splitlines()
@@ -350,7 +350,7 @@ def browser2path(img_path_browser):
 
 def totxt(file):
     base, _ = os.path.splitext(file)
-    file_txt = base + '.txt'
+    file_txt = base + ".txt"
 
     return file_txt
 
@@ -415,12 +415,114 @@ def reduplicative_file_move(src, dst):
 
 def save_image(file_name, filenames, page_index, turn_page_switch, dest_path):
     if file_name is not None and os.path.exists(file_name):
-        reduplicative_file_move(file_name, dest_path)
-        message = f"<div style='color:#999'>{copied_moved[opts.image_browser_copy_image]} to {dest_path}</div>"
-        if not opts.image_browser_copy_image:
-            # Force page refresh with checking filenames
-            filenames = []
-            turn_page_switch += 1
+        try:
+            # Check if txt file exists and should be handled
+            src_txt_exists = False
+            src_txt = None
+            if opts.image_browser_txt_files:
+                src_txt = totxt(file_name)
+                if os.path.exists(src_txt):
+                    src_txt_exists = True
+            
+            # Use the existing save_files function from ui_common.py
+            # First, we need to prepare the data in the format expected by save_files
+            
+            # Read image metadata
+            from PIL import Image
+            try:
+                image = Image.open(file_name)
+                geninfo, items = images.read_info_from_image(image)
+                
+                # Parse generation parameters if available
+                if geninfo:
+                    # Use the already imported sendto module for parameter parsing
+                    parameters = sendto.parse_generation_parameters(geninfo, [])
+                else:
+                    parameters = {}
+                
+                # Create data structure expected by save_files
+                js_data = {
+                    "infotexts": [geninfo or ""],
+                    "index_of_first_image": 0,
+                    "width": image.width,
+                    "height": image.height,
+                    "sampler_name": parameters.get("Sampler", "Unknown"),
+                    "cfg_scale": parameters.get("CFG scale", 7.0),
+                    "steps": parameters.get("Steps", 20),
+                    "sd_model_name": parameters.get("Model", "Unknown"),
+                    "sd_model_hash": parameters.get("Model hash", "Unknown")
+                }
+                
+                # Prepare image data as expected by save_files
+                images_data = [(image, None)]  # (image, info) tuple
+                
+                # Temporarily change the output directory to our destination
+                original_outdir = shared.opts.outdir_save
+                shared.opts.outdir_save = dest_path
+                
+                try:
+                    # Call the existing save_files function
+                    file_result, message_result = save_files(
+                        json.dumps(js_data),
+                        images_data,
+                        False,  # do_make_zip
+                        0       # index
+                    )
+                    message = message_result
+
+                    # Handle .txt file copying/moving manually since save_files doesn't know about it
+                    if src_txt_exists and file_result and "value" in file_result and file_result["value"]:
+                        # Get the saved image filename from the result
+                        saved_files = file_result["value"] if isinstance(file_result["value"], list) else [file_result["value"]]
+                        if saved_files:
+                            # Find the image file (not zip)
+                            saved_image_path = None
+                            for saved_file in saved_files:
+                                if isinstance(saved_file, str) and not saved_file.endswith(".zip"):
+                                    saved_image_path = saved_file
+                                    break
+                            
+                            if saved_image_path:
+                                # Calculate destination txt file path
+                                dest_txt = totxt(saved_image_path)
+                                try:
+                                    if opts.image_browser_copy_image:
+                                        shutil.copy2(src_txt, dest_txt)
+                                    else:
+                                        shutil.move(src_txt, dest_txt)
+                                except Exception as e:
+                                    logger.warning(f"Failed to handle txt file: {e}")
+                
+                finally:
+                    # Restore original output directory
+                    shared.opts.outdir_save = original_outdir
+                
+                # If we're moving (not copying), remove the original file
+                if not opts.image_browser_copy_image:
+                    try:
+                        os.remove(file_name)
+                        # txt file should already be moved above, but clean up if it wasn't
+                        if src_txt_exists and os.path.exists(src_txt):
+                            os.remove(src_txt)
+                    except Exception as e:
+                        logger.warning(f"Failed to remove original file: {e}")
+                    
+                    # Force page refresh with checking filenames
+                    filenames = []
+                    turn_page_switch += 1
+                
+            except Exception as e:
+                logger.warning(f"Failed to use save_files function, falling back to reduplicative_file_move: {e}")
+                # Fallback to original method
+                reduplicative_file_move(file_name, dest_path)
+                message = f"<div style='color:#999'>{copied_moved[opts.image_browser_copy_image]} to {dest_path}</div>"
+                if not opts.image_browser_copy_image:
+                    filenames = []
+                    turn_page_switch += 1
+                    
+        except Exception as e:
+            logger.error(f"Error in save_image: {e}")
+            message = "<div style='color:red'>Error occurred during save operation</div>"
     else:
         message = "<div style='color:#999'>Image not found (may have been already moved)</div>"
 
@@ -591,10 +693,10 @@ def cache_exif(fileinfos):
 
     if yappi_do:
         yappi.stop()
-        pd.set_option('display.float_format', lambda x: '%.6f' % x)
+        pd.set_option("display.float_format", lambda x: "%.6f" % x)
         yappi_stats = yappi.get_func_stats().strip_dirs()
         data = [(s.name, s.ncall, s.tsub, s.ttot, s.ttot/s.ncall) for s in yappi_stats]
-        df = pd.DataFrame(data, columns=['name', 'ncall', 'tsub', 'ttot', 'tavg'])
+        df = pd.DataFrame(data, columns=["name", "ncall", "tsub", "ttot", "tavg"])
         print(df.to_string(index=False))
         yappi.get_thread_stats().print_all()
 
@@ -728,7 +830,7 @@ def natural_keys(text):
     (See Toothy's implementation in the comments)
     float regex comes from https://stackoverflow.com/a/12643073/190597
     '''
-    return [ atof(c) for c in re.split(r'[+-]?([0-9]+(?:[.][0-9]*)?|[.][0-9]+)', text) ]
+    return [ atof(c) for c in re.split(r"[+-]?([0-9]+(?:[.][0-9]*)?|[.][0-9]+)", text) ]
 
 def open_folder(path):
     if os.path.exists(path):
@@ -766,13 +868,13 @@ def exif_search(needle, haystack, use_regex):
         # Function to parse and evaluate the logical expression
         def parse_expression(expression):
             # Split the expression by 'or' to handle OR logic first
-            or_parts = expression.split(' or ')
+            or_parts = expression.split(" or ")
             for part in or_parts:
                 # Split each part by 'and' to handle AND logic
-                and_parts = part.split(' and ')
+                and_parts = part.split(" and ")
                 # Check if all conditions in the AND part are satisfied
                 if all(
-                    (subpart[4:] not in haystack) if subpart.startswith('not ') 
+                    (subpart[4:] not in haystack) if subpart.startswith("not ") 
                     else (subpart in haystack) 
                     for subpart in and_parts
                 ):
@@ -849,7 +951,8 @@ def get_all_images(dir_name, sort_by, sort_order, keyword, tab_base_tag_box, img
         exif_info = dict(exif_cache)
         if exif_info:
             for k, v in exif_info.items():
-                match = re.search(r'(?<='+ sort_by + ":" ').*?(?=(,|$))', v, flags=re.DOTALL|re.IGNORECASE)
+                pattern = "(?<=" + re.escape(sort_by + ":") + ").*?(?=(,|$))"
+                match = re.search(pattern, v, flags=re.DOTALL | re.IGNORECASE)
                 if match:
                     sort_values[k] = match.group().strip()
                 else:
@@ -995,14 +1098,14 @@ def get_thumbnail(image_video, image_list):
                 thumbnail.thumbnail((opts.image_browser_thumbnail_size, opts.image_browser_thumbnail_size))
 
                 if image_video == "video":
-                    play_button_img = Image.new('RGBA', (100, 100), (0, 0, 0, 0))
+                    play_button_img = Image.new("RGBA", (100, 100), (0, 0, 0, 0))
                     play_button_draw = ImageDraw.Draw(play_button_img)
-                    play_button_draw.polygon([(20, 20), (80, 50), (20, 80)], fill='white')
+                    play_button_draw.polygon([(20, 20), (80, 50), (20, 80)], fill="white")
                     play_button_img = play_button_img.resize((50, 50))
 
-                    button_for_img = Image.new('RGBA', thumbnail.size, (0, 0, 0, 0))
+                    button_for_img = Image.new("RGBA", thumbnail.size, (0, 0, 0, 0))
                     button_for_img.paste(play_button_img, (thumbnail.width - play_button_img.width, thumbnail.height - play_button_img.height), mask=play_button_img)
-                    thumbnail_play = Image.alpha_composite(thumbnail.convert('RGBA'), button_for_img)
+                    thumbnail_play = Image.alpha_composite(thumbnail.convert("RGBA"), button_for_img)
                     thumbnail.close()
                     thumbnail = thumbnail_play                    
                 if thumbnail.mode != "RGB":
@@ -1068,9 +1171,9 @@ def get_current_file(tab_base_tag_box, num, page_index, filenames):
     return file
 
 def pnginfo2html(pnginfo, items):
-    items = {**{'parameters': pnginfo}, **items}
+    items = {**{"parameters": pnginfo}, **items}
 
-    info = ''
+    info = ""
     for key, text in items.items():
         info += f"""
             <div>
@@ -1172,7 +1275,7 @@ def change_dir(change_dir_type, img_dir, path_recorder, load_switch, img_path_br
             try:
                 f = os.listdir(img_dir)                
             except:
-                warning = f"'{img_dir} is not a directory"
+                warning = f"{img_dir} is not a directory"
         else:
             warning = "The directory does not exist"
     except:
@@ -1206,11 +1309,11 @@ def update_exif(img_file_name, key, value):
     if geninfo is not None:
         if f"{key}: " in geninfo:
             if value == "None":
-                geninfo = re.sub(f', {key}: \d+(\.\d+)*', '', geninfo)
+                geninfo = re.sub(f", {key}: \d+(\.\d+)*", "", geninfo)
             else:
-                geninfo = re.sub(f'{key}: \d+(\.\d+)*', f'{key}: {value}', geninfo)
+                geninfo = re.sub(f"{key}: \d+(\.\d+)*", f"{key}: {value}", geninfo)
         else:
-            geninfo = f'{geninfo}, {key}: {value}'
+            geninfo = f"{geninfo}, {key}: {value}"
     
     original_time = os.path.getmtime(img_file_name)
     images.save_image(image, os.path.dirname(img_file_name), "", extension=os.path.splitext(img_file_name)[1][1:], info=geninfo, forced_filename=os.path.splitext(os.path.basename(img_file_name))[0], save_to_dirs=False)
@@ -1254,7 +1357,7 @@ def img_file_info_do_format(img_file_info):
         key_value_pairs.append(("Prompt", prompt))
         key_value_pairs.append(("Negative prompt", negative_prompt))
         # Sort the key_value_pairs by the order in img_file_info_order
-        img_file_info_order = opts.image_browser_info_order.split(',')
+        img_file_info_order = opts.image_browser_info_order.split(",")
         key_value_pairs = sorted(key_value_pairs, key=lambda pair: (img_file_info_order.index(pair[0]) if pair[0] in img_file_info_order else len(img_file_info_order), pair[0]))
         img_file_info_formatted = key_value_pairs
     return img_file_info_formatted
@@ -1374,7 +1477,7 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
                             delete_num = gr.Number(value=1, interactive=True, label="delete next", elem_id=f"{tab.base_tag}_image_browser_del_num")
                             delete_confirm = gr.Checkbox(value=False, label="also delete off-screen images")
                         with gr.Column(scale=3):
-                            delete = gr.Button('Delete', elem_id=f"{tab.base_tag}_image_browser_del_img_btn")
+                            delete = gr.Button("Delete", elem_id=f"{tab.base_tag}_image_browser_del_img_btn")
                     with gr.Row() as info_add_panel:
                         with gr.Box(visible=opts.image_browser_info_add):
                             gr.HTML("<h3>Additional Generation Info</h3>")
@@ -1432,7 +1535,7 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
                                     favorites_btn_show = False
                                 else:
                                     favorites_btn_show = True
-                                favorites_btn = gr.Button(f'{copy_move[opts.image_browser_copy_image]} to favorites', elem_id=f"{tab.base_tag}_image_browser_favorites_btn", visible=favorites_btn_show)
+                                favorites_btn = gr.Button(f"{copy_move[opts.image_browser_copy_image]} to favorites", elem_id=f"{tab.base_tag}_image_browser_favorites_btn", visible=favorites_btn_show)
                                 try:
                                     send_to_buttons = sendto.create_buttons(["txt2img", "img2img", "inpaint", "extras"])
                                 except:
@@ -1460,7 +1563,7 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
                             with gr.Row():
                                 to_dir_saved = gr.Dropdown(choices=path_recorder_unformatted, label="Saved directories")
                             with gr.Row():
-                                to_dir_btn = gr.Button(f'{copy_move[opts.image_browser_copy_image]} to directory', elem_id=f"{tab.base_tag}_image_browser_to_dir_btn")
+                                to_dir_btn = gr.Button(f"{copy_move[opts.image_browser_copy_image]} to directory", elem_id=f"{tab.base_tag}_image_browser_to_dir_btn")
 
                     with gr.Row():
                         collected_warning = gr.HTML()
@@ -1470,7 +1573,7 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
                         visible_img_num = gr.Number()                     
                         tab_base_tag_box = gr.Textbox(tab.base_tag)
                         image_index = gr.Textbox(value=-1, elem_id=f"{tab.base_tag}_image_browser_image_index")
-                        set_index = gr.Button('set_index', elem_id=f"{tab.base_tag}_image_browser_set_index")
+                        set_index = gr.Button("set_index", elem_id=f"{tab.base_tag}_image_browser_set_index")
                         filenames = gr.State([])
                         hidden = gr.Image(type="pil", elem_id=f"{tab.base_tag}_image_browser_hidden_image")
                         image_page_list = gr.Textbox(elem_id=f"{tab.base_tag}_image_browser_image_page_list")
@@ -1809,7 +1912,7 @@ def create_tab(tab: ImageBrowserTab, current_gr_tab: gr.Tab):
 
 def run_pnginfo(image, image_path, image_file_name):
     if image is None or os.path.splitext(image_file_name)[1] not in image_ext_list:
-        return '', '', '', '', ''
+        return "", "", "", "", ""
     try:
         geninfo, items = images.read_info_from_image(image)
         info = pnginfo2html(geninfo, items)
@@ -1837,7 +1940,7 @@ def run_pnginfo(image, image_path, image_file_name):
         prompt = ""
         neg_prompt = ""
 
-    return '', geninfo, info, prompt, neg_prompt
+    return "", geninfo, info, prompt, neg_prompt
 
 
 def on_ui_tabs():
@@ -1932,7 +2035,7 @@ def on_ui_settings():
         ("image_browser_video_y", None, 640, "Video player height (px)"),
     ]
 
-    section = ('image-browser', "Image Browser")
+    section = ("image-browser", "Image Browser")
     # Move historic setting names to current names
     added = 0
     for cur_setting_name, old_setting_name, *option_info in image_browser_options:
