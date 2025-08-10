@@ -1,6 +1,6 @@
 from PIL import Image, ImageOps, UnidentifiedImageError, ImageDraw
 from datetime import datetime
-from io import StringIO
+from io import StringIO, BytesIO
 from itertools import chain
 from modules import paths, shared, script_callbacks, scripts, images
 from modules.shared import opts, cmd_opts
@@ -9,11 +9,13 @@ from modules.ui_components import ToolButton, DropdownMulti
 from packaging import version
 from pathlib import Path
 from typing import List, Tuple
+import base64
 import codecs
 import csv
 import gradio as gr
 import hashlib
 import importlib
+import inspect
 import json
 import logging
 import math
@@ -413,6 +415,16 @@ def reduplicative_file_move(src, dst):
             if opts.image_browser_txt_files and src_txt_exists:
                 shutil.move(src_txt, totxt(os.path.join(dst, name)))
 
+def is_save_files_expects_tuple():
+    result = True
+    try:
+        src = inspect.getsource(save_files)
+        if "image_from_url_text" in src:
+            result = False
+    except Exception:
+        pass
+    return result
+
 def save_image(file_name, filenames, page_index, turn_page_switch, dest_path):
     if file_name is not None and os.path.exists(file_name):
         try:
@@ -428,7 +440,6 @@ def save_image(file_name, filenames, page_index, turn_page_switch, dest_path):
             # First, we need to prepare the data in the format expected by save_files
             
             # Read image metadata
-            from PIL import Image
             try:
                 image = Image.open(file_name)
                 geninfo, items = images.read_info_from_image(image)
@@ -453,9 +464,16 @@ def save_image(file_name, filenames, page_index, turn_page_switch, dest_path):
                     "sd_model_hash": parameters.get("Model hash", "Unknown")
                 }
                 
-                # Prepare image data as expected by save_files
-                images_data = [(image, None)]  # (image, info) tuple
-                
+                # Prepare image data as expected by different save_files forks
+                if is_save_files_expects_tuple():
+                    images_data = [(image, None)]
+                else:
+                    with BytesIO() as buf:
+                        image.save(buf, format="PNG", optimize=True)
+                        encoded = base64.b64encode(buf.getbuffer()).decode("ascii")
+
+                    images_data = [encoded]
+
                 # Temporarily change the output directory to our destination
                 original_outdir = shared.opts.outdir_save
                 shared.opts.outdir_save = dest_path
